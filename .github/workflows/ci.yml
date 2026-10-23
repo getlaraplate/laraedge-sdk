@@ -93,9 +93,20 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: go-licenses check
+      # Installed rather than run with `go run`: the Windows check sets GOOS, which must
+      # select the module's packages, not the platform of the tool.
+      - name: Install go-licenses
+        run: go install github.com/google/go-licenses/v2@v2.0.1
+      - name: go-licenses check (linux)
         run: >-
-          go run github.com/google/go-licenses/v2@v2.0.1 check ./...
+          go-licenses check ./...
+          --allowed_licenses=Apache-2.0,BSD-2-Clause,BSD-3-Clause,MIT,ISC
+      # Windows-only dependencies (github.com/Microsoft/go-winio, golang.org/x/sys/windows).
+      - name: go-licenses check (windows)
+        env:
+          GOOS: windows
+        run: >-
+          go-licenses check ./...
           --allowed_licenses=Apache-2.0,BSD-2-Clause,BSD-3-Clause,MIT,ISC
 
   # The generated code must be exactly what scripts/generate.sh produces from
