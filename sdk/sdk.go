@@ -59,9 +59,11 @@ type Input interface {
 	// Probe reads every point of the instance once, within the deadline of ctx (30 seconds).
 	Probe(ctx context.Context, instance string) ([]Sample, error)
 	// Stop releases what the instance holds. The SDK calls it after every Run has returned and,
-	// at Shutdown, once for every configured instance that is not already stopped; during
-	// Shutdown it may overlap with a Run that is still returning. An instance stays configured
-	// after Stop, so Run may be called again. Stop must tolerate an instance it does not know.
+	// at Shutdown, once for every configured instance that is not already stopped. Stop is never
+	// called while Run of the same instance is running, Shutdown included (unless the Shutdown
+	// deadline expires first, in which case Stop is skipped and the process exits). An instance
+	// stays configured after Stop, so Run may be called again. Stop must tolerate an instance it
+	// does not know.
 	Stop(instance string) error
 }
 
@@ -196,7 +198,7 @@ func run(p Plugin, args []string, out, errw io.Writer) int {
 // plugin is inconsistent: the kinds set must be the kinds the manifest offers, and the manifest
 // must pass [manifest.Manifest.Check].
 func buildManifest(p Plugin) (manifest.Manifest, []byte, error) {
-	m := manifest.Manifest{Name: p.Name, Version: p.Version, ProtocolVersions: []string{"v1"}, Kinds: p.Manifest}
+	m := manifest.Manifest{Name: p.Name, Version: p.Version, ProtocolVersions: protocolVersions, Kinds: p.Manifest}
 	var problems []string
 	pair := func(set, offered bool, kind string) {
 		switch {
@@ -427,13 +429,15 @@ func (i *instance) takeStop() bool {
 	return true
 }
 
-func (i *instance) cancelActive() {
+// cancelActive cancels the running stream, if any, and returns it.
+func (i *instance) cancelActive() *activeRun {
 	i.mu.Lock()
 	run := i.active
 	i.mu.Unlock()
 	if run != nil {
 		run.cancel()
 	}
+	return run
 }
 
 // registry holds the instances of one kind.

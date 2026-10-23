@@ -328,3 +328,38 @@ func TestHealthTurnsNotServingWhenShutdownBegins(t *testing.T) {
 		t.Errorf("status = %v, want NOT_SERVING", res.GetStatus())
 	}
 }
+
+func TestShutdownStopsAnInstanceOnlyAfterItsRunReturned(t *testing.T) {
+	in := newFakeInput()
+	stoppedWhileRunning := make(chan bool, 1)
+	in.run = func(ctx context.Context, _ string, _ InputEmitter) error {
+		<-ctx.Done()
+		select {
+		case <-in.stops:
+			stoppedWhileRunning <- true
+		default:
+			stoppedWhileRunning <- false
+		}
+		return ctx.Err()
+	}
+	h, conn := servedProcess(t, inputPlugin(in))
+	input := pb.NewInputClient(conn)
+	configureInput(t, input, "a")
+	if _, err := input.Subscribe(testCtx(t), &pb.SubscribeRequest{InstanceId: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	in.waitStarted(t, "a")
+
+	if _, err := pb.NewPluginClient(conn).Shutdown(testCtx(t), &pb.ShutdownRequest{Deadline: durationpb.New(5 * time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	if code := h.waitExit(t); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if <-stoppedWhileRunning {
+		t.Error("Stop was called while Run was still running")
+	}
+	if len(in.stops) != 1 {
+		t.Errorf("Stop was called %d times, want 1 (after Run returned)", len(in.stops))
+	}
+}

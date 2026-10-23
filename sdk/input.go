@@ -59,15 +59,22 @@ func (is *inputService) stop(id string) {
 	}
 }
 
-// stopAll is the Stop pass of Shutdown: every stream is cancelled and every instance that is not
-// stopped yet is stopped, within ctx.
+// stopAll is the Stop pass of Shutdown: every stream is cancelled, and every instance that is not
+// stopped yet is stopped once its Run has returned (the Subscribe handler then stops it itself),
+// all within ctx. An instance whose Run outlasts ctx is not stopped: the process is about to exit.
 func (is *inputService) stopAll(ctx context.Context) {
 	var wg sync.WaitGroup
 	for id, inst := range is.insts.snapshot() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			inst.cancelActive()
+			if run := inst.cancelActive(); run != nil {
+				select {
+				case <-run.done:
+				case <-ctx.Done():
+					return
+				}
+			}
 			if inst.takeStop() {
 				is.stop(id)
 			}
