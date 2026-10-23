@@ -41,7 +41,9 @@ type InputClient interface {
 	// refused.
 	Configure(ctx context.Context, in *ConfigureRequest, opts ...grpc.CallOption) (*ConfigureResponse, error)
 	// Subscribe opens the stream of events of a configured instance. The plugin
-	// sends events until the stream is cancelled.
+	// sends events until the stream is cancelled. An instance has at most one
+	// stream: while one is open, a second Subscribe of the same instance is
+	// refused with ALREADY_EXISTS.
 	Subscribe(ctx context.Context, in *SubscribeRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[InputEvent], error)
 	// Probe reads every point of the instance once; the deadline is 30 seconds.
 	Probe(ctx context.Context, in *ProbeRequest, opts ...grpc.CallOption) (*ProbeResponse, error)
@@ -118,7 +120,9 @@ type InputServer interface {
 	// refused.
 	Configure(context.Context, *ConfigureRequest) (*ConfigureResponse, error)
 	// Subscribe opens the stream of events of a configured instance. The plugin
-	// sends events until the stream is cancelled.
+	// sends events until the stream is cancelled. An instance has at most one
+	// stream: while one is open, a second Subscribe of the same instance is
+	// refused with ALREADY_EXISTS.
 	Subscribe(*SubscribeRequest, grpc.ServerStreamingServer[InputEvent]) error
 	// Probe reads every point of the instance once; the deadline is 30 seconds.
 	Probe(context.Context, *ProbeRequest) (*ProbeResponse, error)

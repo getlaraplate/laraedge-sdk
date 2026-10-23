@@ -17,7 +17,9 @@ service Input {
   // refused.
   rpc Configure(ConfigureRequest) returns (ConfigureResponse);
   // Subscribe opens the stream of events of a configured instance. The plugin
-  // sends events until the stream is cancelled.
+  // sends events until the stream is cancelled. An instance has at most one
+  // stream: while one is open, a second Subscribe of the same instance is
+  // refused with ALREADY_EXISTS.
   rpc Subscribe(SubscribeRequest) returns (stream InputEvent);
   // Probe reads every point of the instance once; the deadline is 30 seconds.
   rpc Probe(ProbeRequest) returns (ProbeResponse);

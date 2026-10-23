@@ -40,7 +40,9 @@ type ProcessorClient interface {
 	// deadline is 10 seconds.
 	Configure(ctx context.Context, in *ConfigureRequest, opts ...grpc.CallOption) (*ConfigureResponse, error)
 	// Process is the bidirectional stream of an instance. The first message from
-	// the agent is always a ProcessStart.
+	// the agent is always a ProcessStart. An instance has at most one stream:
+	// while one is open, a second Process of the same instance is refused with
+	// ALREADY_EXISTS.
 	Process(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ProcessorIn, ProcessorOut], error)
 }
 
@@ -87,7 +89,9 @@ type ProcessorServer interface {
 	// deadline is 10 seconds.
 	Configure(context.Context, *ConfigureRequest) (*ConfigureResponse, error)
 	// Process is the bidirectional stream of an instance. The first message from
-	// the agent is always a ProcessStart.
+	// the agent is always a ProcessStart. An instance has at most one stream:
+	// while one is open, a second Process of the same instance is refused with
+	// ALREADY_EXISTS.
 	Process(grpc.BidiStreamingServer[ProcessorIn, ProcessorOut]) error
 	mustEmbedUnimplementedProcessorServer()
 }

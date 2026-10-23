@@ -18,7 +18,9 @@ service Processor {
   // deadline is 10 seconds.
   rpc Configure(ConfigureRequest) returns (ConfigureResponse);
   // Process is the bidirectional stream of an instance. The first message from
-  // the agent is always a ProcessStart.
+  // the agent is always a ProcessStart. An instance has at most one stream:
+  // while one is open, a second Process of the same instance is refused with
+  // ALREADY_EXISTS.
   rpc Process(stream ProcessorIn) returns (stream ProcessorOut);
 }
 
