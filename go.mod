@@ -5,6 +5,7 @@ go 1.27
 toolchain go1.27.2
 
 require (
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	google.golang.org/grpc v1.84.0
 	google.golang.org/protobuf v1.36.12
 )
