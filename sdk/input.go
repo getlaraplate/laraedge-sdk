@@ -22,7 +22,7 @@ type inputService struct {
 }
 
 func (is *inputService) Configure(ctx context.Context, req *pb.ConfigureRequest) (*pb.ConfigureResponse, error) {
-	return configureRPC(ctx, &is.insts, req, func(id string, cfg json.RawMessage) []ConfigError {
+	return configureRPC(ctx, is.s.ctx, &is.insts, req, func(id string, cfg json.RawMessage) []ConfigError {
 		return is.in.Configure(ctx, id, cfg)
 	})
 }
@@ -33,13 +33,15 @@ func (is *inputService) Subscribe(req *pb.SubscribeRequest, stream pb.Input_Subs
 	if err != nil {
 		return err
 	}
-	ctx, run, err := inst.acquire(stream.Context())
+	ctx, run, err := inst.acquire(stream.Context(), is.s.ctx)
 	if err != nil {
 		return err
 	}
 	defer func() {
 		if inst.takeStop() {
-			is.stop(id)
+			stopCtx, cancel := is.s.stopContext()
+			is.stop(stopCtx, id)
+			cancel()
 		}
 		inst.release(run)
 	}()
@@ -52,16 +54,18 @@ func (is *inputService) Subscribe(req *pb.SubscribeRequest, stream pb.Input_Subs
 }
 
 // stop calls the author's Stop, recovering a panic.
-func (is *inputService) stop(id string) {
+func (is *inputService) stop(ctx context.Context, id string) {
 	defer is.s.log.recovered("Input.Stop", nil)
-	if err := is.in.Stop(id); err != nil {
+	if err := is.in.Stop(ctx, id); err != nil {
 		is.s.log.printf("Input.Stop failed: %v", err)
 	}
 }
 
-// stopAll is the Stop pass of Shutdown: every stream is cancelled, and every instance that is not
-// stopped yet is stopped once its Run has returned (the Subscribe handler then stops it itself),
-// all within ctx. An instance whose Run outlasts ctx is not stopped: the process is about to exit.
+// stopAll is the Stop pass of Shutdown, which has already made new streams and Configures refuse:
+// every stream is cancelled, and every instance that is not stopped yet is stopped once its Run
+// has returned (the Subscribe handler then stops it itself) and once a Configure in progress has
+// finished (stopAll holds the instance's semaphore while it decides and stops), all within ctx.
+// An instance whose Run or Configure outlasts ctx is not stopped: the process is about to exit.
 func (is *inputService) stopAll(ctx context.Context) {
 	var wg sync.WaitGroup
 	for id, inst := range is.insts.snapshot() {
@@ -75,8 +79,14 @@ func (is *inputService) stopAll(ctx context.Context) {
 					return
 				}
 			}
+			select {
+			case inst.sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-inst.sem }()
 			if inst.takeStop() {
-				is.stop(id)
+				is.stop(ctx, id)
 			}
 		}()
 	}
@@ -152,11 +162,11 @@ func (e *inputEmitter) Answered(device string) error {
 	return e.emit(&pb.InputEvent{Event: &pb.InputEvent_Answered{Answered: &pb.Answered{Device: device}}})
 }
 
-func (e *inputEmitter) Health(connected bool, readError string) error {
+func (e *inputEmitter) Health(connected bool, readError ReadError) error {
 	switch readError {
-	case "", "timeout", "connection", "exception", "decode":
+	case "", ReadErrorTimeout, ReadErrorConnection, ReadErrorException, ReadErrorDecode:
 	default:
 		return fmt.Errorf("sdk: refusing to emit: read error kind must be timeout, connection, exception or decode")
 	}
-	return e.emit(&pb.InputEvent{Event: &pb.InputEvent_Health{Health: &pb.Health{Connected: connected, ReadError: readError}}})
+	return e.emit(&pb.InputEvent{Event: &pb.InputEvent_Health{Health: &pb.Health{Connected: connected, ReadError: string(readError)}}})
 }

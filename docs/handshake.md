@@ -36,8 +36,8 @@ environment: they arrive resolved inside the configuration of an instance (`Conf
 | `LARAPLATE_EDGE_PLUGIN_PROTOCOLS` | comma-separated protocol versions, preferred first, for example `v1` | Each entry is trimmed; empty entries are ignored. |
 | `LARAPLATE_EDGE_PLUGIN_SOCKET_DIR` | absolute path of a directory | Unix only. Not set on Windows. |
 
-The working directory of the plugin is the directory of its binary unless the host says otherwise. Do not rely on it:
-the conformance suite starts every plugin with its working directory in a fresh temporary directory.
+A plugin must not rely on its working directory: the agent starts it in the plugin's directory, the conformance suite
+in a fresh temporary one.
 
 ## Negotiation and exit codes
 
@@ -372,6 +372,8 @@ The plugin answers (the Go SDK answers at once with an empty response), then sto
 cancels its streams, stops every input instance, stops the gRPC server gracefully (forcefully once the deadline has
 passed), closes its listener (which removes the Unix socket) and exits with code **0**. A handler that ignores its
 context cannot hold the process past the deadline. The call is idempotent: only the first one starts the sequence.
+Once it has begun, every other call except `Info`, `Shutdown` and the health service is refused with `UNAVAILABLE`, so
+no instance is configured or started after it was stopped.
 
 Because the plugin may exit before its answer is flushed, **the host treats `UNAVAILABLE` and EOF as the answer to
 `Shutdown`**, and success is the exit with code 0 within the deadline. The conformance check `shutdown` checks a health

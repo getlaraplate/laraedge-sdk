@@ -119,6 +119,39 @@ func TestProcessorReceivesRecordsAndItsSamplesReachTheClient(t *testing.T) {
 	}
 }
 
+// withSample returns a valid sample record changed by mutate.
+func withSample(mutate func(*pb.Sample)) *pb.Record {
+	r := sampleRecord("d", 1)
+	mutate(r.GetSample())
+	return r
+}
+
+// birthRecord returns a birth record of one signal; kind and dataType are the enums under test.
+func birthRecord(kind pb.EventKind, dataType pb.DataType) *pb.Record {
+	return &pb.Record{Item: &pb.Record_DeviceEvent{DeviceEvent: &pb.DeviceEvent{
+		Kind: kind, Device: "d", Ts: timestamppb.New(time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)),
+		Signals: []*pb.SignalInfo{{Signal: "state", DataType: dataType}},
+	}}}
+}
+
+// enumOutOfRangeRecords are records whose enums are outside the defined values; the SDK must
+// refuse them rather than narrow them into a defined (or the zero) value.
+func enumOutOfRangeRecords() map[string]*pb.Record {
+	return map[string]*pb.Record{
+		"quality unspecified":    withSample(func(s *pb.Sample) { s.Quality = pb.Quality_QUALITY_UNSPECIFIED }),
+		"quality above range":    withSample(func(s *pb.Sample) { s.Quality = 4 }),
+		"quality 257 (wraps)":    withSample(func(s *pb.Sample) { s.Quality = 257 }),
+		"priority unspecified":   withSample(func(s *pb.Sample) { s.Priority = pb.Priority_PRIORITY_UNSPECIFIED }),
+		"priority above range":   withSample(func(s *pb.Sample) { s.Priority = 3 }),
+		"priority 257 (wraps)":   withSample(func(s *pb.Sample) { s.Priority = 257 }),
+		"event kind unknown":     birthRecord(3, pb.DataType_DATA_TYPE_NUMBER),
+		"event kind 257":         birthRecord(257, pb.DataType_DATA_TYPE_NUMBER),
+		"event kind unspecified": birthRecord(pb.EventKind_EVENT_KIND_UNSPECIFIED, pb.DataType_DATA_TYPE_NUMBER),
+		"data type unknown":      birthRecord(pb.EventKind_EVENT_KIND_BIRTH, 4),
+		"data type unspecified":  birthRecord(pb.EventKind_EVENT_KIND_BIRTH, pb.DataType_DATA_TYPE_UNSPECIFIED),
+	}
+}
+
 func TestProcessorRefusesBadStreams(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -133,6 +166,13 @@ func TestProcessorRefusesBadStreams(t *testing.T) {
 		{"record without item", []*pb.ProcessorIn{startMsg("a"), recordMsg(&pb.Record{})}, codes.InvalidArgument},
 		{"sample without value", []*pb.ProcessorIn{startMsg("a"), recordMsg(&pb.Record{Item: &pb.Record_Sample{Sample: &pb.Sample{Device: "d"}}})}, codes.InvalidArgument},
 		{"message without start or record", []*pb.ProcessorIn{startMsg("a"), {}}, codes.InvalidArgument},
+	}
+	for name, r := range enumOutOfRangeRecords() {
+		cases = append(cases, struct {
+			name     string
+			messages []*pb.ProcessorIn
+			want     codes.Code
+		}{"record with " + name, []*pb.ProcessorIn{startMsg("a"), recordMsg(r)}, codes.InvalidArgument})
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

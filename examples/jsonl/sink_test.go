@@ -31,7 +31,7 @@ func configuredSink(t *testing.T, path string) *sink {
 }
 
 func sampleRecord(device string, v int64) sdk.Record {
-	return sdk.Record{Sample: &sdk.Sample{Device: device, Signal: "count", TS: t0, Value: sdk.IntValue(v), Quality: sdk.Good, Priority: sdk.Critical}}
+	return sdk.Record{Sample: &sdk.Sample{Device: device, Signal: "count", TS: t0, Value: sdk.IntValue(v), Quality: sdk.QualityGood, Priority: sdk.PriorityCritical}}
 }
 
 func batch(id string, seq uint64, records ...sdk.Record) sdk.Batch {
@@ -125,9 +125,9 @@ func TestSendAppendsOneJSONLinePerBatch(t *testing.T) {
 		MessageID: "m1", SourceSeq: 7,
 		Records: []sdk.Record{
 			sampleRecord("press-1", 3),
-			{Event: &sdk.DeviceEvent{Kind: sdk.Birth, Device: "press-1", TS: t0, Signals: []sdk.SignalInfo{{Signal: "count", DataType: sdk.DataTypeNumber, Unit: "pcs"}}}},
+			{Event: &sdk.DeviceEvent{Kind: sdk.EventBirth, Device: "press-1", TS: t0, Signals: []sdk.SignalInfo{{Signal: "count", DataType: sdk.DataTypeNumber, Unit: "pcs"}}}},
 		},
-		Losses: []sdk.LossMarker{{Priority: sdk.Bulk, From: t0, To: t0.Add(time.Minute), Count: 12, Reason: "buffer_full"}},
+		Losses: []sdk.LossMarker{{Priority: sdk.PriorityBulk, From: t0, To: t0.Add(time.Minute), Count: 12, Reason: "buffer_full"}},
 	}
 	if o := send(s, b1); o.Kind != sdk.OutcomeAccepted {
 		t.Fatalf("first batch = %+v", o)
@@ -197,7 +197,7 @@ func TestValueTypesAreKept(t *testing.T) {
 	values := []sdk.Value{f, sdk.IntValue(-2), sdk.BoolValue(true), sdk.StringValue("x")}
 	var recs []sdk.Record
 	for _, v := range values {
-		recs = append(recs, sdk.Record{Sample: &sdk.Sample{Device: "d", Signal: "s", TS: t0, Value: v, Quality: sdk.Uncertain, Priority: sdk.Bulk}})
+		recs = append(recs, sdk.Record{Sample: &sdk.Sample{Device: "d", Signal: "s", TS: t0, Value: v, Quality: sdk.QualityUncertain, Priority: sdk.PriorityBulk}})
 	}
 	if o := send(s, batch("m", 1, recs...)); o.Kind != sdk.OutcomeAccepted {
 		t.Fatalf("outcome = %+v", o)
@@ -287,7 +287,7 @@ func TestRejectInvalidBatches(t *testing.T) {
 		b    sdk.Batch
 	}{
 		{"sample without device", batch("m", 1, sampleRecord("d", 1), sampleRecord("", 2))},
-		{"event without device", batch("m", 1, sdk.Record{Event: &sdk.DeviceEvent{Kind: sdk.Death, TS: t0}})},
+		{"event without device", batch("m", 1, sdk.Record{Event: &sdk.DeviceEvent{Kind: sdk.EventDeath, TS: t0}})},
 		{"record without sample or event", batch("m", 1, sdk.Record{})},
 		{"no message id", batch("", 1, sampleRecord("d", 1))},
 	}

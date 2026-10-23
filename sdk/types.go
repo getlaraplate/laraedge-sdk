@@ -17,40 +17,40 @@ type Quality uint8
 
 // Sample qualities.
 const (
-	// Good: the value was read and can be trusted.
-	Good Quality = iota + 1
-	// Uncertain: the value was read but may be stale or inexact.
-	Uncertain
-	// Bad: the value could not be read.
-	Bad
+	// QualityGood: the value was read and can be trusted.
+	QualityGood Quality = iota + 1
+	// QualityUncertain: the value was read but may be stale or inexact.
+	QualityUncertain
+	// QualityBad: the value could not be read.
+	QualityBad
 )
 
 // Valid reports whether q is one of the defined qualities.
-func (q Quality) Valid() bool { return q >= Good && q <= Bad }
+func (q Quality) Valid() bool { return q >= QualityGood && q <= QualityBad }
 
 // Priority is the buffer class of a sample. The zero value is invalid.
 type Priority uint8
 
 // Priority classes.
 const (
-	// Critical is for states, alarms, counts, measurements and references.
-	Critical Priority = iota + 1
-	// Bulk is for process values.
-	Bulk
+	// PriorityCritical is for states, alarms, counts, measurements and references.
+	PriorityCritical Priority = iota + 1
+	// PriorityBulk is for process values.
+	PriorityBulk
 )
 
 // Valid reports whether p is one of the defined priorities.
-func (p Priority) Valid() bool { return p == Critical || p == Bulk }
+func (p Priority) Valid() bool { return p == PriorityCritical || p == PriorityBulk }
 
 // ValueKind says which field of a [Value] is set. The zero value is invalid.
 type ValueKind uint8
 
 // Value kinds.
 const (
-	KindFloat ValueKind = iota + 1
-	KindInt
-	KindBool
-	KindString
+	ValueKindFloat ValueKind = iota + 1
+	ValueKindInt
+	ValueKindBool
+	ValueKindString
 )
 
 // Value holds exactly one of float64, int64, bool or string: the one named by Kind. Build it
@@ -69,26 +69,26 @@ func FloatValue(f float64) (Value, error) {
 	if math.IsNaN(f) || math.IsInf(f, 0) {
 		return Value{}, errors.New("float value is not finite")
 	}
-	return Value{Kind: KindFloat, Float: f}, nil
+	return Value{Kind: ValueKindFloat, Float: f}, nil
 }
 
 // IntValue returns an integer Value.
-func IntValue(i int64) Value { return Value{Kind: KindInt, Int: i} }
+func IntValue(i int64) Value { return Value{Kind: ValueKindInt, Int: i} }
 
 // BoolValue returns a boolean Value.
-func BoolValue(b bool) Value { return Value{Kind: KindBool, Bool: b} }
+func BoolValue(b bool) Value { return Value{Kind: ValueKindBool, Bool: b} }
 
 // StringValue returns a string Value.
-func StringValue(s string) Value { return Value{Kind: KindString, Str: s} }
+func StringValue(s string) Value { return Value{Kind: ValueKindString, Str: s} }
 
 // Validate reports whether the value has a known kind and, for floats, is finite.
 func (v Value) Validate() error {
 	switch v.Kind {
-	case KindFloat:
+	case ValueKindFloat:
 		if math.IsNaN(v.Float) || math.IsInf(v.Float, 0) {
 			return errors.New("float value is not finite")
 		}
-	case KindInt, KindBool, KindString:
+	case ValueKindInt, ValueKindBool, ValueKindString:
 	default:
 		return fmt.Errorf("invalid value kind %d", uint8(v.Kind))
 	}
@@ -127,6 +127,23 @@ func (s Sample) Validate() error {
 	return nil
 }
 
+// ReadError is the kind of the last read error of an input instance, reported with
+// [InputEmitter.Health]. It travels on the wire as its string value; the empty value means the
+// last read succeeded.
+type ReadError string
+
+// Read error kinds.
+const (
+	// ReadErrorTimeout: the device did not answer in time.
+	ReadErrorTimeout ReadError = "timeout"
+	// ReadErrorConnection: the connection to the device failed or was lost.
+	ReadErrorConnection ReadError = "connection"
+	// ReadErrorException: the device answered with an error.
+	ReadErrorException ReadError = "exception"
+	// ReadErrorDecode: the answer of the device could not be decoded.
+	ReadErrorDecode ReadError = "decode"
+)
+
 // Data types of a signal declared in a birth.
 const (
 	DataTypeNumber  = "number"
@@ -146,10 +163,10 @@ type EventKind uint8
 
 // Device event kinds.
 const (
-	// Birth announces a device and lists its signals.
-	Birth EventKind = iota + 1
-	// Death says the driver lost the device.
-	Death
+	// EventBirth announces a device and lists its signals.
+	EventBirth EventKind = iota + 1
+	// EventDeath says the driver lost the device.
+	EventDeath
 )
 
 // DeviceEvent is a device lifecycle event. The agent drives births and deaths; plugins receive
@@ -264,11 +281,11 @@ func toProtoValue(v Value) (*pb.Value, error) {
 		return nil, err
 	}
 	switch v.Kind {
-	case KindFloat:
+	case ValueKindFloat:
 		return &pb.Value{Kind: &pb.Value_DoubleValue{DoubleValue: v.Float}}, nil
-	case KindInt:
+	case ValueKindInt:
 		return &pb.Value{Kind: &pb.Value_IntValue{IntValue: v.Int}}, nil
-	case KindBool:
+	case ValueKindBool:
 		return &pb.Value{Kind: &pb.Value_BoolValue{BoolValue: v.Bool}}, nil
 	default:
 		return &pb.Value{Kind: &pb.Value_StringValue{StringValue: v.Str}}, nil
@@ -278,13 +295,13 @@ func toProtoValue(v Value) (*pb.Value, error) {
 func fromProtoValue(v *pb.Value) (Value, error) {
 	switch k := v.GetKind().(type) {
 	case *pb.Value_DoubleValue:
-		return Value{Kind: KindFloat, Float: k.DoubleValue}, nil
+		return Value{Kind: ValueKindFloat, Float: k.DoubleValue}, nil
 	case *pb.Value_IntValue:
-		return Value{Kind: KindInt, Int: k.IntValue}, nil
+		return Value{Kind: ValueKindInt, Int: k.IntValue}, nil
 	case *pb.Value_BoolValue:
-		return Value{Kind: KindBool, Bool: k.BoolValue}, nil
+		return Value{Kind: ValueKindBool, Bool: k.BoolValue}, nil
 	case *pb.Value_StringValue:
-		return Value{Kind: KindString, Str: k.StringValue}, nil
+		return Value{Kind: ValueKindString, Str: k.StringValue}, nil
 	default:
 		return Value{}, errEmptyOneof
 	}
@@ -309,8 +326,45 @@ func toProtoSample(s Sample) (*pb.Sample, error) {
 	}, nil
 }
 
+// fromProtoQuality, fromProtoPriority and fromProtoEventKind narrow an enum received from the
+// agent, refusing a value outside the defined ones (UNSPECIFIED included, never valid on the
+// wire) so that an unknown value never reaches the author.
+func fromProtoQuality(q pb.Quality) (Quality, error) {
+	if q < pb.Quality_QUALITY_GOOD || q > pb.Quality_QUALITY_BAD {
+		return 0, fmt.Errorf("invalid quality %d", int32(q))
+	}
+	return Quality(q), nil
+}
+
+func fromProtoPriority(p pb.Priority) (Priority, error) {
+	if p < pb.Priority_PRIORITY_CRITICAL || p > pb.Priority_PRIORITY_BULK {
+		return 0, fmt.Errorf("invalid priority %d", int32(p))
+	}
+	return Priority(p), nil
+}
+
+func fromProtoEventKind(k pb.EventKind) (EventKind, error) {
+	if k < pb.EventKind_EVENT_KIND_BIRTH || k > pb.EventKind_EVENT_KIND_DEATH {
+		return 0, fmt.Errorf("invalid event kind %d", int32(k))
+	}
+	return EventKind(k), nil
+}
+
+func fromProtoDataType(d pb.DataType) (string, error) {
+	switch d {
+	case pb.DataType_DATA_TYPE_NUMBER:
+		return DataTypeNumber, nil
+	case pb.DataType_DATA_TYPE_BOOLEAN:
+		return DataTypeBoolean, nil
+	case pb.DataType_DATA_TYPE_STRING:
+		return DataTypeString, nil
+	}
+	return "", fmt.Errorf("invalid data type %d", int32(d))
+}
+
 // fromProtoSample converts a sample received from the agent. It refuses a sample without a value
-// kind; it does not judge the agent's data otherwise.
+// kind or with a quality or priority outside the defined ones; it does not judge the agent's data
+// otherwise.
 func fromProtoSample(s *pb.Sample) (Sample, error) {
 	if s == nil {
 		return Sample{}, errEmptyOneof
@@ -323,13 +377,21 @@ func fromProtoSample(s *pb.Sample) (Sample, error) {
 	if err != nil {
 		return Sample{}, err
 	}
+	quality, err := fromProtoQuality(s.GetQuality())
+	if err != nil {
+		return Sample{}, err
+	}
+	priority, err := fromProtoPriority(s.GetPriority())
+	if err != nil {
+		return Sample{}, err
+	}
 	return Sample{
 		Device:   s.GetDevice(),
 		Signal:   s.GetSignal(),
 		TS:       ts,
 		Value:    value,
-		Quality:  Quality(s.GetQuality()),
-		Priority: Priority(s.GetPriority()),
+		Quality:  quality,
+		Priority: priority,
 	}, nil
 }
 
@@ -341,23 +403,22 @@ func fromProtoEvent(e *pb.DeviceEvent) (DeviceEvent, error) {
 	if err != nil {
 		return DeviceEvent{}, err
 	}
+	kind, err := fromProtoEventKind(e.GetKind())
+	if err != nil {
+		return DeviceEvent{}, err
+	}
 	signals := make([]SignalInfo, 0, len(e.GetSignals()))
-	for _, si := range e.GetSignals() {
-		info := SignalInfo{Signal: si.GetSignal(), Unit: si.GetUnit()}
-		switch si.GetDataType() {
-		case pb.DataType_DATA_TYPE_NUMBER:
-			info.DataType = DataTypeNumber
-		case pb.DataType_DATA_TYPE_BOOLEAN:
-			info.DataType = DataTypeBoolean
-		case pb.DataType_DATA_TYPE_STRING:
-			info.DataType = DataTypeString
+	for i, si := range e.GetSignals() {
+		dataType, err := fromProtoDataType(si.GetDataType())
+		if err != nil {
+			return DeviceEvent{}, fmt.Errorf("signals[%d]: %w", i, err)
 		}
-		signals = append(signals, info)
+		signals = append(signals, SignalInfo{Signal: si.GetSignal(), DataType: dataType, Unit: si.GetUnit()})
 	}
 	if len(signals) == 0 {
 		signals = nil
 	}
-	return DeviceEvent{Kind: EventKind(e.GetKind()), Device: e.GetDevice(), Signals: signals, TS: ts}, nil
+	return DeviceEvent{Kind: kind, Device: e.GetDevice(), Signals: signals, TS: ts}, nil
 }
 
 // fromProtoRecord converts a record received from the agent; a record without an item is
@@ -405,8 +466,12 @@ func fromProtoBatch(b *pb.Batch) (Batch, error) {
 		if err != nil {
 			return Batch{}, fmt.Errorf("losses[%d].to: %w", i, err)
 		}
+		priority, err := fromProtoPriority(l.GetPriority())
+		if err != nil {
+			return Batch{}, fmt.Errorf("losses[%d]: %w", i, err)
+		}
 		out.Losses = append(out.Losses, LossMarker{
-			Priority: Priority(l.GetPriority()), From: from, To: to, Count: l.GetCount(), Reason: l.GetReason(),
+			Priority: priority, From: from, To: to, Count: l.GetCount(), Reason: l.GetReason(),
 		})
 	}
 	return out, nil

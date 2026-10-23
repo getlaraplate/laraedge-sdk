@@ -292,11 +292,11 @@ func encodeBatch(b sdk.Batch) ([]byte, error) {
 
 func plainValue(v sdk.Value) (any, string) {
 	switch v.Kind {
-	case sdk.KindFloat:
+	case sdk.ValueKindFloat:
 		return v.Float, "float"
-	case sdk.KindInt:
+	case sdk.ValueKindInt:
 		return v.Int, "int"
-	case sdk.KindBool:
+	case sdk.ValueKindBool:
 		return v.Bool, "bool"
 	default:
 		return v.Str, "string"

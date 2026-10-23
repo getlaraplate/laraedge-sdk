@@ -185,7 +185,7 @@ func TestInputEmitterRefusesBadEvents(t *testing.T) {
 	in.run = func(ctx context.Context, _ string, out InputEmitter) error {
 		noDevice := testSample("")
 		badFloat := testSample("a")
-		badFloat.Value = Value{Kind: KindFloat, Float: math.NaN()}
+		badFloat.Value = Value{Kind: ValueKindFloat, Float: math.NaN()}
 		results <- []error{
 			out.Sample(bad),
 			out.Sample(noDevice),

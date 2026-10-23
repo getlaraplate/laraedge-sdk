@@ -58,14 +58,14 @@ func (clock) Configure(_ context.Context, _ string, raw json.RawMessage) []sdk.C
 
 func reading() sdk.Sample {
 	now := time.Now().UTC()
-	return sdk.Sample{Device: "clock", Signal: "now", TS: now, Value: sdk.IntValue(now.Unix()), Quality: sdk.Good, Priority: sdk.Bulk}
+	return sdk.Sample{Device: "clock", Signal: "now", TS: now, Value: sdk.IntValue(now.Unix()), Quality: sdk.QualityGood, Priority: sdk.PriorityBulk}
 }
 
 func (clock) Probe(context.Context, string) ([]sdk.Sample, error) {
 	return []sdk.Sample{reading()}, nil
 }
 
-func (clock) Stop(string) error { return nil }
+func (clock) Stop(context.Context, string) error { return nil }
 
 func (clock) Run(ctx context.Context, _ string, out sdk.InputEmitter) error {
 	for {

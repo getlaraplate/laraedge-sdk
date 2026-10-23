@@ -20,7 +20,7 @@ type outputService struct {
 }
 
 func (svc *outputService) Configure(ctx context.Context, req *pb.ConfigureRequest) (*pb.ConfigureResponse, error) {
-	return configureRPC(ctx, &svc.insts, req, func(id string, cfg json.RawMessage) []ConfigError {
+	return configureRPC(ctx, svc.s.ctx, &svc.insts, req, func(id string, cfg json.RawMessage) []ConfigError {
 		return svc.o.Configure(ctx, id, cfg)
 	})
 }

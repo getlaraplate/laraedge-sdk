@@ -21,12 +21,12 @@ const section = `{
 var t0 = time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
 
 func stateSample(device string, v sdk.Value, q sdk.Quality, at int) sdk.Record {
-	s := sdk.Sample{Device: device, Signal: "state", TS: t0.Add(time.Duration(at) * time.Second), Value: v, Quality: q, Priority: sdk.Critical}
+	s := sdk.Sample{Device: device, Signal: "state", TS: t0.Add(time.Duration(at) * time.Second), Value: v, Quality: q, Priority: sdk.PriorityCritical}
 	return sdk.Record{Sample: &s}
 }
 
 func good(device string, v int64, at int) sdk.Record {
-	return stateSample(device, sdk.IntValue(v), sdk.Good, at)
+	return stateSample(device, sdk.IntValue(v), sdk.QualityGood, at)
 }
 
 // run configures a processor, feeds the records and returns what it emitted.
@@ -137,7 +137,7 @@ func TestEmitsTheMaximumWheneverItChanges(t *testing.T) {
 	}
 	var got []step
 	for _, s := range out {
-		if s.Device != "line-1" || s.Signal != "state" || s.Quality != sdk.Good || s.Priority != sdk.Critical || s.Value.Kind != sdk.KindInt {
+		if s.Device != "line-1" || s.Signal != "state" || s.Quality != sdk.QualityGood || s.Priority != sdk.PriorityCritical || s.Value.Kind != sdk.ValueKindInt {
 			t.Errorf("unexpected sample %+v", s)
 		}
 		got = append(got, step{int(s.TS.Sub(t0) / time.Second), s.Value.Int})
@@ -148,18 +148,18 @@ func TestEmitsTheMaximumWheneverItChanges(t *testing.T) {
 }
 
 func TestIgnoresWhatItCannotUse(t *testing.T) {
-	notAState := sdk.Record{Sample: &sdk.Sample{Device: "press-1", Signal: "temp", TS: t0, Value: sdk.IntValue(99), Quality: sdk.Good, Priority: sdk.Bulk}}
+	notAState := sdk.Record{Sample: &sdk.Sample{Device: "press-1", Signal: "temp", TS: t0, Value: sdk.IntValue(99), Quality: sdk.QualityGood, Priority: sdk.PriorityBulk}}
 	unobserved := good("other", 50, 1)
-	birth := sdk.Record{Event: &sdk.DeviceEvent{Kind: sdk.Birth, Device: "press-1", TS: t0}}
+	birth := sdk.Record{Event: &sdk.DeviceEvent{Kind: sdk.EventBirth, Device: "press-1", TS: t0}}
 	float, _ := sdk.FloatValue(7)
 	tests := []struct {
 		name string
 		rec  sdk.Record
 	}{
-		{"float value", stateSample("press-1", float, sdk.Good, 1)},
-		{"string value", stateSample("press-1", sdk.StringValue("7"), sdk.Good, 1)},
-		{"bool value", stateSample("press-1", sdk.BoolValue(true), sdk.Good, 1)},
-		{"bad quality", stateSample("press-1", sdk.IntValue(7), sdk.Bad, 1)},
+		{"float value", stateSample("press-1", float, sdk.QualityGood, 1)},
+		{"string value", stateSample("press-1", sdk.StringValue("7"), sdk.QualityGood, 1)},
+		{"bool value", stateSample("press-1", sdk.BoolValue(true), sdk.QualityGood, 1)},
+		{"bad quality", stateSample("press-1", sdk.IntValue(7), sdk.QualityBad, 1)},
 		{"other signal", notAState},
 		{"unobserved device", unobserved},
 		{"device event", birth},
@@ -172,8 +172,8 @@ func TestIgnoresWhatItCannotUse(t *testing.T) {
 			}
 		})
 	}
-	// Uncertain readings are used: only Bad is dropped.
-	if out := run(t, []sdk.Record{stateSample("press-1", sdk.IntValue(7), sdk.Uncertain, 1)}); len(out) != 1 {
+	// QualityUncertain readings are used: only QualityBad is dropped.
+	if out := run(t, []sdk.Record{stateSample("press-1", sdk.IntValue(7), sdk.QualityUncertain, 1)}); len(out) != 1 {
 		t.Errorf("an uncertain integer state emitted %d samples, want 1", len(out))
 	}
 }
@@ -181,7 +181,7 @@ func TestIgnoresWhatItCannotUse(t *testing.T) {
 func TestAnIgnoredSampleKeepsThePreviousState(t *testing.T) {
 	out := run(t, []sdk.Record{
 		good("press-1", 5, 1),
-		stateSample("press-1", sdk.IntValue(9), sdk.Bad, 2),
+		stateSample("press-1", sdk.IntValue(9), sdk.QualityBad, 2),
 		good("press-2", 3, 3),
 	})
 	if len(out) != 1 || out[0].Value.Int != 5 {

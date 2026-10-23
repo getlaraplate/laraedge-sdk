@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,7 +35,7 @@ func installHooks(t *testing.T, listenErr error) *serveHooks {
 	h := &serveHooks{exitCodes: make(chan int, 4), stdout: &syncBuffer{}, stderr: &syncBuffer{}, lis: bufconn.Listen(1 << 20)}
 	oldExit, oldListen, oldStdout, oldStderr, oldArgs := exit, listen, stdout, stderr, programArgs
 	exit = func(code int) { h.exitCodes <- code }
-	listen = func([]string) (net.Listener, handshake.Protocol, error) {
+	listen = func([]string) (net.Listener, string, error) {
 		if listenErr != nil {
 			return nil, "", listenErr
 		}
@@ -361,5 +362,193 @@ func TestShutdownStopsAnInstanceOnlyAfterItsRunReturned(t *testing.T) {
 	}
 	if len(in.stops) != 1 {
 		t.Errorf("Stop was called %d times, want 1 (after Run returned)", len(in.stops))
+	}
+}
+
+// TestShutdownRefusesSubscribeAndConfigureOnceItsStopPassBegan reproduces calls that grpc-go still
+// dispatches after Shutdown began (they reached it before the client processed GOAWAY): on an idle
+// configured instance whose Stop is running, a Subscribe must not start Run (which would call Stop
+// a second time) and a Configure must not run the author's Configure, for that instance or for one
+// created after the Stop pass took its snapshot.
+func TestShutdownRefusesSubscribeAndConfigureOnceItsStopPassBegan(t *testing.T) {
+	in := newFakeInput()
+	var stopCalls, configures atomic.Int32
+	stopEntered := make(chan struct{})
+	releaseStop := make(chan struct{})
+	in.stop = func(context.Context, string) {
+		if stopCalls.Add(1) == 1 {
+			close(stopEntered)
+			<-releaseStop
+		}
+	}
+	in.configure = func(context.Context, string, json.RawMessage) []ConfigError {
+		configures.Add(1)
+		return nil
+	}
+	h := start(t, inputPlugin(in))
+	configureInput(t, pb.NewInputClient(h.conn), "a")
+
+	h.srv.beginShutdown(5 * time.Second)
+	select {
+	case <-stopEntered:
+	case <-testCtx(t).Done():
+		t.Fatal("Stop was never called")
+	}
+	is := h.srv.input
+	err := is.Subscribe(&pb.SubscribeRequest{InstanceId: "a"}, &fakeSubscribeStream{ctx: testCtx(t)})
+	wantCode(t, err, codes.Unavailable)
+	for _, id := range []string{"a", "created-after-the-snapshot"} {
+		_, err := is.Configure(testCtx(t), &pb.ConfigureRequest{InstanceId: id, Config: []byte(`{}`)})
+		wantCode(t, err, codes.Unavailable)
+	}
+	close(releaseStop)
+	<-h.srv.finished
+
+	select {
+	case got := <-in.started:
+		t.Errorf("Run of %s started during the shutdown", got)
+	default:
+	}
+	if n := configures.Load(); n != 1 {
+		t.Errorf("the author's Configure ran %d times, want 1 (before the shutdown)", n)
+	}
+	if n := stopCalls.Load(); n != 1 {
+		t.Errorf("Stop was called %d times, want 1", n)
+	}
+}
+
+// TestShutdownStopsNoInstanceWhileItsConfigureRuns begins Shutdown while the author's Configure
+// of an instance is running: Stop of that instance must wait for it (here the deadline passes
+// first, so Stop is skipped).
+func TestShutdownStopsNoInstanceWhileItsConfigureRuns(t *testing.T) {
+	in := newFakeInput()
+	stopEntered := make(chan struct{}, 1)
+	in.stop = func(context.Context, string) {
+		select {
+		case stopEntered <- struct{}{}:
+		default:
+		}
+	}
+	h := start(t, inputPlugin(in))
+	finished := h.srv.finished
+	configuring := make(chan struct{})
+	overlapped := make(chan bool, 1)
+	in.configure = func(context.Context, string, json.RawMessage) []ConfigError {
+		close(configuring)
+		select {
+		case <-stopEntered:
+			overlapped <- true
+		case <-finished:
+			overlapped <- false
+		}
+		return nil
+	}
+	go func() {
+		_, _ = pb.NewInputClient(h.conn).Configure(testCtx(t), &pb.ConfigureRequest{InstanceId: "a", Config: []byte(`{}`)})
+	}()
+	<-configuring
+	h.srv.beginShutdown(300 * time.Millisecond)
+	if <-overlapped {
+		t.Error("Stop ran while Configure of the same instance was running")
+	}
+}
+
+func TestCallsAreRefusedOnceShutdownBegan(t *testing.T) {
+	h := start(t, fullPlugin())
+	h.srv.beginShutdown(time.Second)
+	<-h.srv.finished
+	unary := []struct {
+		method string
+		served bool
+	}{
+		{pb.Plugin_Info_FullMethodName, true},
+		{pb.Plugin_Shutdown_FullMethodName, true},
+		{grpc_health_v1.Health_Check_FullMethodName, true},
+		{pb.Input_Configure_FullMethodName, false},
+		{pb.Input_Probe_FullMethodName, false},
+		{pb.Input_Browse_FullMethodName, false},
+		{pb.Processor_Configure_FullMethodName, false},
+		{pb.Output_Configure_FullMethodName, false},
+		{pb.Output_Send_FullMethodName, false},
+	}
+	for _, tc := range unary {
+		called := false
+		_, err := h.srv.refuseUnaryWhenShuttingDown(testCtx(t), nil, &grpc.UnaryServerInfo{FullMethod: tc.method},
+			func(context.Context, any) (any, error) { called = true; return nil, nil })
+		if called != tc.served {
+			t.Errorf("%s: handler called = %v, want %v", tc.method, called, tc.served)
+		}
+		if !tc.served {
+			wantCode(t, err, codes.Unavailable)
+		}
+	}
+	streams := []struct {
+		method string
+		served bool
+	}{
+		{grpc_health_v1.Health_Watch_FullMethodName, true},
+		{pb.Input_Subscribe_FullMethodName, false},
+		{pb.Processor_Process_FullMethodName, false},
+	}
+	for _, tc := range streams {
+		called := false
+		err := h.srv.refuseStreamWhenShuttingDown(nil, nil, &grpc.StreamServerInfo{FullMethod: tc.method},
+			func(any, grpc.ServerStream) error { called = true; return nil })
+		if called != tc.served {
+			t.Errorf("%s: handler called = %v, want %v", tc.method, called, tc.served)
+		}
+		if !tc.served {
+			wantCode(t, err, codes.Unavailable)
+		}
+	}
+}
+
+func TestStopContextIsBounded(t *testing.T) {
+	type stopCall struct {
+		instance string
+		left     time.Duration
+		ok       bool
+	}
+	in := newFakeInput()
+	calls := make(chan stopCall, 8)
+	in.stop = func(ctx context.Context, instance string) {
+		deadline, ok := ctx.Deadline()
+		calls <- stopCall{instance, time.Until(deadline), ok}
+	}
+	h, conn := servedProcess(t, inputPlugin(in))
+	input := pb.NewInputClient(conn)
+	configureInput(t, input, "ended")
+	configureInput(t, input, "idle")
+	configureInput(t, input, "running")
+
+	streamCtx, cancel := context.WithCancel(testCtx(t))
+	stream, err := input.Subscribe(streamCtx, &pb.SubscribeRequest{InstanceId: "ended"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.waitStarted(t, "ended")
+	cancel()
+	_, _ = stream.Recv()
+	got := <-calls
+	if got.instance != "ended" || !got.ok || got.left <= stopTimeout/2 || got.left > stopTimeout {
+		t.Errorf("Stop after the stream ended: %+v, want a deadline of %v", got, stopTimeout)
+	}
+
+	if _, err := input.Subscribe(testCtx(t), &pb.SubscribeRequest{InstanceId: "running"}); err != nil {
+		t.Fatal(err)
+	}
+	in.waitStarted(t, "running")
+	const deadline = 3 * time.Second
+	if _, err := pb.NewPluginClient(conn).Shutdown(testCtx(t), &pb.ShutdownRequest{Deadline: durationpb.New(deadline)}); err != nil {
+		t.Fatal(err)
+	}
+	if code := h.waitExit(t); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	for range 2 {
+		got := <-calls
+		if !got.ok || got.left > deadline {
+			t.Errorf("Stop of %s at Shutdown: %+v, want the Shutdown deadline (%v)", got.instance, got, deadline)
+		}
 	}
 }

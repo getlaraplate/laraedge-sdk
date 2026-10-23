@@ -22,7 +22,7 @@ type processorService struct {
 }
 
 func (ps *processorService) Configure(ctx context.Context, req *pb.ConfigureRequest) (*pb.ConfigureResponse, error) {
-	return configureRPC(ctx, &ps.insts, req, func(id string, cfg json.RawMessage) []ConfigError {
+	return configureRPC(ctx, ps.s.ctx, &ps.insts, req, func(id string, cfg json.RawMessage) []ConfigError {
 		return ps.p.Configure(ctx, id, cfg)
 	})
 }
@@ -44,7 +44,7 @@ func (ps *processorService) Process(stream pb.Processor_ProcessServer) error {
 	if err != nil {
 		return err
 	}
-	ctx, run, err := inst.acquire(stream.Context())
+	ctx, run, err := inst.acquire(stream.Context(), ps.s.ctx)
 	if err != nil {
 		return err
 	}

@@ -65,7 +65,7 @@ func (p point) value(polls int64) sdk.Value {
 }
 
 func (p point) sample(polls int64, at time.Time) sdk.Sample {
-	return sdk.Sample{Device: p.device, Signal: p.signal, TS: at, Value: p.value(polls), Quality: sdk.Good, Priority: p.priority}
+	return sdk.Sample{Device: p.device, Signal: p.signal, TS: at, Value: p.value(polls), Quality: sdk.QualityGood, Priority: p.priority}
 }
 
 // counter implements sdk.Input and sdk.Browser. The points of an instance are fixed by Configure;
@@ -169,9 +169,9 @@ func parseAddress(address string) (int64, bool) {
 func parsePriority(s string) (sdk.Priority, bool) {
 	switch s {
 	case "", "bulk":
-		return sdk.Bulk, true
+		return sdk.PriorityBulk, true
 	case "critical":
-		return sdk.Critical, true
+		return sdk.PriorityCritical, true
 	}
 	return 0, false
 }
@@ -276,4 +276,4 @@ func poll(ctx context.Context, p point, t ticker, out sdk.InputEmitter) error {
 }
 
 // Stop has nothing to release: the instance keeps no connection. It tolerates any instance.
-func (c *counter) Stop(string) error { return nil }
+func (c *counter) Stop(context.Context, string) error { return nil }

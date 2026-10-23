@@ -60,11 +60,13 @@ type Input interface {
 	Probe(ctx context.Context, instance string) ([]Sample, error)
 	// Stop releases what the instance holds. The SDK calls it after every Run has returned and,
 	// at Shutdown, once for every configured instance that is not already stopped. Stop is never
-	// called while Run of the same instance is running, Shutdown included (unless the Shutdown
-	// deadline expires first, in which case Stop is skipped and the process exits). An instance
-	// stays configured after Stop, so Run may be called again. Stop must tolerate an instance it
-	// does not know.
-	Stop(instance string) error
+	// called while Run or Configure of the same instance is running, Shutdown included (unless
+	// the Shutdown deadline expires first, in which case Stop is skipped and the process exits),
+	// and once Shutdown has begun no instance is configured or run again. An instance stays
+	// configured after Stop, so Run may be called again. Stop must tolerate an instance it does
+	// not know. Its context carries the deadline of the Shutdown at Shutdown and a deadline of
+	// 10 seconds after a stream ended; Stop should return by that deadline.
+	Stop(ctx context.Context, instance string) error
 }
 
 // Browser is implemented by an [Input] that lists the nodes of its source. An Input without it
@@ -83,8 +85,9 @@ type InputEmitter interface {
 	// Answered reports that the device answered, also when it has no new samples.
 	Answered(device string) error
 	// Health reports whether the instance is connected and, when it is not, the kind of the last
-	// read error: timeout, connection, exception or decode (empty when the last read succeeded).
-	Health(connected bool, readError string) error
+	// read error (empty when the last read succeeded). A kind other than the four ReadError
+	// constants is refused with an error and not sent.
+	Health(connected bool, readError ReadError) error
 }
 
 // Processor derives samples from the records of the devices it observes. A plugin never
@@ -148,6 +151,9 @@ var (
 
 // defaultShutdownDeadline applies when Shutdown carries no deadline.
 const defaultShutdownDeadline = 5 * time.Second
+
+// stopTimeout bounds the Stop the SDK calls after a stream of an input instance ended.
+const stopTimeout = 10 * time.Second
 
 // Serve runs the plugin and exits the process; it does not return.
 //
@@ -353,13 +359,26 @@ type instance struct {
 
 func newInstance() *instance { return &instance{sem: make(chan struct{}, 1)} }
 
+// errShuttingDown refuses the calls that arrive once Shutdown has begun.
+var errShuttingDown = status.Error(codes.Unavailable, "the plugin is shutting down")
+
 // configure runs call (the author's Configure) as the only Configure of the instance, with its
 // stream stopped first. The instance is configured afterwards only when call reported no error.
-func (i *instance) configure(ctx context.Context, call func() []ConfigError) ([]ConfigError, error) {
+// Once serving is done (Shutdown has begun) it refuses with UNAVAILABLE and leaves the instance
+// as it is: the check is made while holding the semaphore, which the Stop pass of Shutdown takes
+// too, so the author's Configure and Stop never overlap.
+func (i *instance) configure(ctx, serving context.Context, call func() []ConfigError) ([]ConfigError, error) {
+	if serving.Err() != nil {
+		return nil, errShuttingDown
+	}
 	select {
 	case i.sem <- struct{}{}:
 	case <-ctx.Done():
 		return nil, status.FromContextError(ctx.Err()).Err()
+	}
+	if serving.Err() != nil {
+		<-i.sem
+		return nil, errShuttingDown
 	}
 	i.mu.Lock()
 	i.configured = false
@@ -387,10 +406,15 @@ func (i *instance) configure(ctx context.Context, call func() []ConfigError) ([]
 	return errs, nil
 }
 
-// acquire starts the stream of a configured instance; one stream at a time per instance.
-func (i *instance) acquire(parent context.Context) (context.Context, *activeRun, error) {
+// acquire starts the stream of a configured instance; one stream at a time per instance. Once
+// serving is done (Shutdown has begun) it refuses with UNAVAILABLE: the check is made under i.mu,
+// as is the Stop pass's decision, so no stream starts on an instance that pass stopped.
+func (i *instance) acquire(parent, serving context.Context) (context.Context, *activeRun, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	if serving.Err() != nil {
+		return nil, nil, errShuttingDown
+	}
 	if !i.configured {
 		return nil, nil, status.Error(codes.FailedPrecondition, "the instance is not configured")
 	}
@@ -484,15 +508,16 @@ func (r *registry) snapshot() map[string]*instance {
 	return out
 }
 
-// configureRPC is the Configure of every kind.
-func configureRPC(ctx context.Context, reg *registry, req *pb.ConfigureRequest,
+// configureRPC is the Configure of every kind. serving is the server's context, done once
+// Shutdown has begun.
+func configureRPC(ctx, serving context.Context, reg *registry, req *pb.ConfigureRequest,
 	call func(id string, cfg json.RawMessage) []ConfigError,
 ) (*pb.ConfigureResponse, error) {
 	id := req.GetInstanceId()
 	if id == "" {
 		return nil, status.Error(codes.InvalidArgument, "instance_id is required")
 	}
-	errs, err := reg.obtain(id).configure(ctx, func() []ConfigError { return call(id, json.RawMessage(req.GetConfig())) })
+	errs, err := reg.obtain(id).configure(ctx, serving, func() []ConfigError { return call(id, json.RawMessage(req.GetConfig())) })
 	if err != nil {
 		return nil, err
 	}
@@ -505,7 +530,7 @@ type server struct {
 	log      *logger
 	grpc     *grpc.Server
 	health   *health.Server
-	// ctx is cancelled when Shutdown begins: it ends the streams.
+	// ctx is cancelled when Shutdown begins: it ends the streams and refuses new calls.
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -515,6 +540,7 @@ type server struct {
 
 	mu       sync.Mutex
 	lis      net.Listener
+	bound    context.Context // the deadline of the Shutdown, set before ctx is cancelled
 	once     sync.Once
 	finished chan struct{} // closed when the shutdown sequence is complete
 }
@@ -526,8 +552,8 @@ func newServer(p Plugin, manifestJSON []byte, errw io.Writer) *server {
 	s.grpc = grpc.NewServer(
 		grpc.MaxRecvMsgSize(handshake.MaxMessageSize),
 		grpc.MaxSendMsgSize(handshake.MaxMessageSize),
-		grpc.ChainUnaryInterceptor(s.recoverUnary),
-		grpc.ChainStreamInterceptor(s.recoverStream),
+		grpc.ChainUnaryInterceptor(s.recoverUnary, s.refuseUnaryWhenShuttingDown),
+		grpc.ChainStreamInterceptor(s.recoverStream, s.refuseStreamWhenShuttingDown),
 	)
 	pb.RegisterPluginServer(s.grpc, &pluginService{s: s, name: p.Name, version: p.Version})
 	healthpb.RegisterHealthServer(s.grpc, s.health)
@@ -556,6 +582,46 @@ func (s *server) recoverUnary(ctx context.Context, req any, info *grpc.UnaryServ
 func (s *server) recoverStream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
 	defer s.log.recovered(info.FullMethod, &err)
 	return handler(srv, ss)
+}
+
+// refuseUnaryWhenShuttingDown and refuseStreamWhenShuttingDown refuse with UNAVAILABLE every call
+// that arrives once Shutdown has begun, except Info, Shutdown and the health service. grpc-go
+// still dispatches calls that reached it before the client processed GOAWAY. A call that passes
+// here just before Shutdown begins is refused by the instance itself (acquire, configure) when it
+// would start a stream or configure.
+func (s *server) refuseUnaryWhenShuttingDown(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+	if s.ctx.Err() != nil && !servedDuringShutdown(info.FullMethod) {
+		return nil, errShuttingDown
+	}
+	return handler(ctx, req)
+}
+
+func (s *server) refuseStreamWhenShuttingDown(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	if s.ctx.Err() != nil && !servedDuringShutdown(info.FullMethod) {
+		return errShuttingDown
+	}
+	return handler(srv, ss)
+}
+
+// servedDuringShutdown reports whether a method is still served once Shutdown has begun.
+func servedDuringShutdown(fullMethod string) bool {
+	switch fullMethod {
+	case pb.Plugin_Info_FullMethodName, pb.Plugin_Shutdown_FullMethodName:
+		return true
+	}
+	return strings.HasPrefix(fullMethod, "/"+healthpb.Health_ServiceDesc.ServiceName+"/")
+}
+
+// stopContext returns the context of a Stop called after a stream ended: bounded by
+// [stopTimeout] and, once Shutdown has begun, by its deadline.
+func (s *server) stopContext() (context.Context, context.CancelFunc) {
+	s.mu.Lock()
+	parent := s.bound
+	s.mu.Unlock()
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(parent, stopTimeout)
 }
 
 // serve serves on lis until Shutdown completes (exit code 0) or serving fails (1). It does not
@@ -595,10 +661,13 @@ func (s *server) beginShutdown(deadline time.Duration) {
 // passes, and the listener is closed (which removes the socket).
 func (s *server) shutdown(deadline time.Duration) {
 	defer close(s.finished)
-	s.health.Shutdown()
-	s.cancel()
 	bound, release := context.WithTimeout(context.Background(), deadline)
 	defer release()
+	s.mu.Lock()
+	s.bound = bound
+	s.mu.Unlock()
+	s.health.Shutdown()
+	s.cancel()
 
 	graceful := make(chan struct{})
 	go func() {

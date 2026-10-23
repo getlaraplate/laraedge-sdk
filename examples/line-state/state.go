@@ -95,7 +95,7 @@ func parseSection(cfg json.RawMessage) (settings, *sdk.ConfigError) {
 		return fail("devices[0].device", "must not be one of the observed devices")
 	}
 	s.derived = device.Device
-	s.priority = sdk.Critical
+	s.priority = sdk.PriorityCritical
 	found := false
 	for i, sig := range device.Signals {
 		if sig.Signal != stateSignal {
@@ -109,7 +109,7 @@ func parseSection(cfg json.RawMessage) (settings, *sdk.ConfigError) {
 		switch sig.Priority {
 		case "", "critical":
 		case "bulk":
-			s.priority = sdk.Bulk
+			s.priority = sdk.PriorityBulk
 		default:
 			return fail(path+".priority", "must be critical or bulk")
 		}
@@ -140,7 +140,7 @@ func (p *processor) settings(instance string) (settings, error) {
 // maximum changes, with the timestamp of the sample that changed it.
 //
 // What it ignores: samples of other signals or of devices that are not observed, samples whose
-// value is not an integer, samples of quality Bad (Uncertain is used), and device events. An
+// value is not an integer, samples of quality QualityBad (QualityUncertain is used), and device events. An
 // ignored sample leaves the previous state of its device in place, so a device that stops
 // reporting keeps counting at its last state.
 func (p *processor) Process(ctx context.Context, instance string, in <-chan sdk.Record, out func(sdk.Sample) error) error {
@@ -160,7 +160,7 @@ func (p *processor) Process(ctx context.Context, instance string, in <-chan sdk.
 				return nil
 			}
 			s := rec.Sample
-			if s == nil || s.Signal != stateSignal || !cfg.observed[s.Device] || s.Quality == sdk.Bad || s.Value.Kind != sdk.KindInt {
+			if s == nil || s.Signal != stateSignal || !cfg.observed[s.Device] || s.Quality == sdk.QualityBad || s.Value.Kind != sdk.ValueKindInt {
 				continue
 			}
 			last[s.Device] = s.Value.Int
@@ -174,7 +174,7 @@ func (p *processor) Process(ctx context.Context, instance string, in <-chan sdk.
 			emitted, hasEmitted = highest, true
 			derived := sdk.Sample{
 				Device: cfg.derived, Signal: stateSignal, TS: s.TS,
-				Value: sdk.IntValue(highest), Quality: sdk.Good, Priority: cfg.priority,
+				Value: sdk.IntValue(highest), Quality: sdk.QualityGood, Priority: cfg.priority,
 			}
 			if err := out(derived); err != nil {
 				return err

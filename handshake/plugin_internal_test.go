@@ -30,7 +30,7 @@ func TestListenChecksTheCookieAndNegotiates(t *testing.T) {
 		cookie    string
 		offered   string
 		supported []string
-		want      Protocol
+		want      string
 		wantErr   error
 	}{
 		{"no cookie", "", "v1", []string{"v1"}, "", ErrNotLaunched},

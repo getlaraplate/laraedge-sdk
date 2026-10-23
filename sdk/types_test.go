@@ -11,7 +11,7 @@ import (
 )
 
 func TestValueConstructors(t *testing.T) {
-	if v, err := FloatValue(1.5); err != nil || v.Kind != KindFloat || v.Float != 1.5 {
+	if v, err := FloatValue(1.5); err != nil || v.Kind != ValueKindFloat || v.Float != 1.5 {
 		t.Errorf("FloatValue(1.5) = %+v, %v", v, err)
 	}
 	for _, f := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
@@ -19,13 +19,13 @@ func TestValueConstructors(t *testing.T) {
 			t.Errorf("FloatValue(%v) accepted", f)
 		}
 	}
-	if v := IntValue(-3); v.Kind != KindInt || v.Int != -3 {
+	if v := IntValue(-3); v.Kind != ValueKindInt || v.Int != -3 {
 		t.Errorf("IntValue = %+v", v)
 	}
-	if v := BoolValue(true); v.Kind != KindBool || !v.Bool {
+	if v := BoolValue(true); v.Kind != ValueKindBool || !v.Bool {
 		t.Errorf("BoolValue = %+v", v)
 	}
-	if v := StringValue("x"); v.Kind != KindString || v.Str != "x" {
+	if v := StringValue("x"); v.Kind != ValueKindString || v.Str != "x" {
 		t.Errorf("StringValue = %+v", v)
 	}
 }
@@ -36,8 +36,8 @@ func TestSampleRoundTrip(t *testing.T) {
 	for _, v := range values {
 		in := testSample("press-1")
 		in.Value = v
-		in.Quality = Uncertain
-		in.Priority = Bulk
+		in.Quality = QualityUncertain
+		in.Priority = PriorityBulk
 		wire, err := toProtoSample(in)
 		if err != nil {
 			t.Fatalf("toProtoSample(%+v): %v", v, err)
@@ -58,7 +58,7 @@ func TestSampleValidation(t *testing.T) {
 		"no signal":    func(s *Sample) { s.Signal = "" },
 		"no timestamp": func(s *Sample) { s.TS = time.Time{} },
 		"no value":     func(s *Sample) { s.Value = Value{} },
-		"nan":          func(s *Sample) { s.Value = Value{Kind: KindFloat, Float: math.NaN()} },
+		"nan":          func(s *Sample) { s.Value = Value{Kind: ValueKindFloat, Float: math.NaN()} },
 		"no quality":   func(s *Sample) { s.Quality = 0 },
 		"bad quality":  func(s *Sample) { s.Quality = 9 },
 		"no priority":  func(s *Sample) { s.Priority = 0 },
@@ -96,7 +96,10 @@ func TestTimestampsAreUTC(t *testing.T) {
 }
 
 func TestFromProtoRefusesEmptyOneofs(t *testing.T) {
-	good := &pb.Sample{Device: "d", Signal: "s", Ts: timestamppb.Now(), Value: &pb.Value{Kind: &pb.Value_BoolValue{BoolValue: true}}}
+	good := &pb.Sample{
+		Device: "d", Signal: "s", Ts: timestamppb.Now(), Value: &pb.Value{Kind: &pb.Value_BoolValue{BoolValue: true}},
+		Quality: pb.Quality_QUALITY_UNCERTAIN, Priority: pb.Priority_PRIORITY_BULK,
+	}
 	noValue := &pb.Sample{Device: "d", Signal: "s", Ts: timestamppb.Now()}
 	emptyValue := &pb.Sample{Device: "d", Signal: "s", Ts: timestamppb.Now(), Value: &pb.Value{}}
 	if _, err := fromProtoSample(good); err != nil {
@@ -131,5 +134,42 @@ func TestOutcomeConversion(t *testing.T) {
 	}
 	if res.GetRetryAfter().AsDuration() != 0 {
 		t.Errorf("negative retry_after sent as %v, want 0", res.GetRetryAfter().AsDuration())
+	}
+}
+
+func TestFromProtoNarrowsEveryDefinedEnumValue(t *testing.T) {
+	for _, q := range []pb.Quality{pb.Quality_QUALITY_GOOD, pb.Quality_QUALITY_UNCERTAIN, pb.Quality_QUALITY_BAD} {
+		for _, p := range []pb.Priority{pb.Priority_PRIORITY_CRITICAL, pb.Priority_PRIORITY_BULK} {
+			r := withSample(func(s *pb.Sample) { s.Quality, s.Priority = q, p })
+			rec, err := fromProtoRecord(r)
+			if err != nil {
+				t.Fatalf("%v %v refused: %v", q, p, err)
+			}
+			if int32(rec.Sample.Quality) != int32(q) || int32(rec.Sample.Priority) != int32(p) {
+				t.Errorf("%v %v narrowed to %d %d", q, p, rec.Sample.Quality, rec.Sample.Priority)
+			}
+		}
+	}
+	dataTypes := map[pb.DataType]string{
+		pb.DataType_DATA_TYPE_NUMBER: DataTypeNumber, pb.DataType_DATA_TYPE_BOOLEAN: DataTypeBoolean, pb.DataType_DATA_TYPE_STRING: DataTypeString,
+	}
+	for _, k := range []pb.EventKind{pb.EventKind_EVENT_KIND_BIRTH, pb.EventKind_EVENT_KIND_DEATH} {
+		for d, want := range dataTypes {
+			rec, err := fromProtoRecord(birthRecord(k, d))
+			if err != nil {
+				t.Fatalf("%v %v refused: %v", k, d, err)
+			}
+			if int32(rec.Event.Kind) != int32(k) || rec.Event.Signals[0].DataType != want {
+				t.Errorf("%v %v narrowed to %d %q", k, d, rec.Event.Kind, rec.Event.Signals[0].DataType)
+			}
+		}
+	}
+}
+
+func TestFromProtoRefusesEnumsOutsideTheirRange(t *testing.T) {
+	for name, r := range enumOutOfRangeRecords() {
+		if rec, err := fromProtoRecord(r); err == nil {
+			t.Errorf("%s: accepted as %+v", name, rec)
+		}
 	}
 }

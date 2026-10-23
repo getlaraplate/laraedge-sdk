@@ -151,14 +151,14 @@ func TestOutputSendDeliversTheBatchAndTheDeadline(t *testing.T) {
 	if b.MessageID != "0198-id" || b.SourceSeq != 9 || len(b.Records) != 2 || len(b.Losses) != 1 {
 		t.Fatalf("batch = %+v", b)
 	}
-	if s := b.Records[0].Sample; s == nil || s.Device != "press-1" || s.Value.Kind != KindInt || s.Value.Int != 3 || s.Quality != Good || s.Priority != Critical {
+	if s := b.Records[0].Sample; s == nil || s.Device != "press-1" || s.Value.Kind != ValueKindInt || s.Value.Int != 3 || s.Quality != QualityGood || s.Priority != PriorityCritical {
 		t.Errorf("record 0 = %+v", b.Records[0])
 	}
-	if e := b.Records[1].Event; e == nil || e.Kind != Birth || e.Device != "press-1" || len(e.Signals) != 1 || e.Signals[0] != (SignalInfo{Signal: "temp", DataType: DataTypeNumber, Unit: "C"}) {
+	if e := b.Records[1].Event; e == nil || e.Kind != EventBirth || e.Device != "press-1" || len(e.Signals) != 1 || e.Signals[0] != (SignalInfo{Signal: "temp", DataType: DataTypeNumber, Unit: "C"}) {
 		t.Errorf("record 1 = %+v", b.Records[1])
 	}
 	l := b.Losses[0]
-	if l.Priority != Bulk || l.Count != 4 || l.Reason != "buffer_full" || !l.From.Equal(time.Date(2026, 10, 23, 11, 0, 0, 0, time.UTC)) || !l.To.Equal(time.Date(2026, 10, 23, 11, 5, 0, 0, time.UTC)) {
+	if l.Priority != PriorityBulk || l.Count != 4 || l.Reason != "buffer_full" || !l.From.Equal(time.Date(2026, 10, 23, 11, 0, 0, 0, time.UTC)) || !l.To.Equal(time.Date(2026, 10, 23, 11, 5, 0, 0, time.UTC)) {
 		t.Errorf("loss = %+v", l)
 	}
 }
@@ -175,7 +175,12 @@ func TestOutputRefusesGarbageWithoutCallingThePlugin(t *testing.T) {
 		"sample without value": sendRequest("a", "m", &pb.Record{Item: &pb.Record_Sample{Sample: &pb.Sample{
 			Device: "d", Signal: "s", Quality: pb.Quality_QUALITY_GOOD, Priority: pb.Priority_PRIORITY_BULK,
 		}}}),
-		"sample is nil": sendRequest("a", "m", &pb.Record{Item: &pb.Record_Sample{}}),
+		"sample is nil":             sendRequest("a", "m", &pb.Record{Item: &pb.Record_Sample{}}),
+		"loss priority unspecified": {InstanceId: "a", Batch: &pb.Batch{MessageId: "m", Losses: []*pb.LossMarker{{Count: 1}}}},
+		"loss priority 257":         {InstanceId: "a", Batch: &pb.Batch{MessageId: "m", Losses: []*pb.LossMarker{{Priority: 257, Count: 1}}}},
+	}
+	for name, r := range enumOutOfRangeRecords() {
+		cases["record with "+name] = sendRequest("a", "m", r)
 	}
 	for name, req := range cases {
 		t.Run(name, func(t *testing.T) {

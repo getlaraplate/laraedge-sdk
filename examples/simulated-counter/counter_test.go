@@ -75,8 +75,8 @@ func (r *recorder) Answered(device string) error {
 	return nil
 }
 
-func (r *recorder) Health(connected bool, readError string) error {
-	r.events <- event{kind: "health", connects: connected, read: readError}
+func (r *recorder) Health(connected bool, readError sdk.ReadError) error {
+	r.events <- event{kind: "health", connects: connected, read: string(readError)}
 	return nil
 }
 
@@ -93,7 +93,7 @@ func configured(t *testing.T, section string) (*counter, *fakeClock) {
 
 func intOf(t *testing.T, s sdk.Sample) int64 {
 	t.Helper()
-	if s.Value.Kind != sdk.KindInt {
+	if s.Value.Kind != sdk.ValueKindInt {
 		t.Fatalf("value kind = %d, want int", s.Value.Kind)
 	}
 	return s.Value.Int
@@ -178,7 +178,7 @@ func TestConfigureAcceptsAValidSectionAndPointPriority(t *testing.T) {
 	for _, s := range samples {
 		priorities[s.Device+"/"+s.Signal] = s.Priority
 	}
-	if priorities["press-1/parts"] != sdk.Critical || priorities["press-1/strokes"] != sdk.Bulk {
+	if priorities["press-1/parts"] != sdk.PriorityCritical || priorities["press-1/strokes"] != sdk.PriorityBulk {
 		t.Errorf("priorities = %v, want parts critical and strokes bulk", priorities)
 	}
 }
@@ -210,7 +210,7 @@ func TestProbeGivesOneSampleAfterOnePollPerPoint(t *testing.T) {
 		if err := s.Validate(); err != nil {
 			t.Errorf("invalid sample %s/%s: %v", s.Device, s.Signal, err)
 		}
-		if s.Quality != sdk.Good {
+		if s.Quality != sdk.QualityGood {
 			t.Errorf("%s/%s quality = %d, want good", s.Device, s.Signal, s.Quality)
 		}
 		got[s.Device+"/"+s.Signal] = intOf(t, s)
@@ -309,10 +309,10 @@ func TestRunPollsAtEachPointsTickAndAnswersPerDevice(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Errorf("Run after cancel = %v, want nil", err)
 	}
-	if err := c.Stop("i1"); err != nil {
+	if err := c.Stop(context.Background(), "i1"); err != nil {
 		t.Errorf("Stop: %v", err)
 	}
-	if err := c.Stop("unknown"); err != nil {
+	if err := c.Stop(context.Background(), "unknown"); err != nil {
 		t.Errorf("Stop of an unknown instance: %v", err)
 	}
 }
@@ -363,7 +363,7 @@ type failingEmitter struct{ err error }
 
 func (f failingEmitter) Sample(sdk.Sample) error { return f.err }
 func (f failingEmitter) Answered(string) error   { return f.err }
-func (f failingEmitter) Health(bool, string) error {
+func (f failingEmitter) Health(bool, sdk.ReadError) error {
 	return f.err
 }
 

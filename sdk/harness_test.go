@@ -15,6 +15,7 @@ import (
 
 	"github.com/getlaraplate/laraedge-sdk/handshake"
 	"github.com/getlaraplate/laraedge-sdk/manifest"
+	pb "github.com/getlaraplate/laraedge-sdk/pluginv1"
 )
 
 // testTimeout bounds every blocking wait of a test so a bug fails instead of hanging.
@@ -109,6 +110,7 @@ type fakeInput struct {
 	configure func(ctx context.Context, instance string, cfg json.RawMessage) []ConfigError
 	run       func(ctx context.Context, instance string, out InputEmitter) error
 	probe     func(ctx context.Context, instance string) ([]Sample, error)
+	stop      func(ctx context.Context, instance string) // runs before the instance is recorded in stops
 	stops     chan string
 	started   chan string
 }
@@ -156,7 +158,10 @@ func (f *fakeInput) Probe(ctx context.Context, instance string) ([]Sample, error
 	return nil, nil
 }
 
-func (f *fakeInput) Stop(instance string) error {
+func (f *fakeInput) Stop(ctx context.Context, instance string) error {
+	if f.stop != nil {
+		f.stop(ctx, instance)
+	}
 	f.stops <- instance
 	return nil
 }
@@ -219,7 +224,18 @@ func testSample(device string) Sample {
 		Signal:   "temperature",
 		TS:       time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC),
 		Value:    IntValue(7),
-		Quality:  Good,
-		Priority: Critical,
+		Quality:  QualityGood,
+		Priority: PriorityCritical,
 	}
 }
+
+// fakeSubscribeStream is the server side of a Subscribe stream, for calling the handler directly
+// as grpc-go does with a stream that arrived before the client processed GOAWAY.
+type fakeSubscribeStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (f *fakeSubscribeStream) Context() context.Context { return f.ctx }
+
+func (f *fakeSubscribeStream) Send(*pb.InputEvent) error { return nil }
