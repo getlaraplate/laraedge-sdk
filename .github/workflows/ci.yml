@@ -97,3 +97,27 @@ jobs:
         run: >-
           go run github.com/google/go-licenses/v2@v2.0.1 check ./...
           --allowed_licenses=Apache-2.0,BSD-2-Clause,BSD-3-Clause,MIT,ISC
+
+  # The generated code must be exactly what scripts/generate.sh produces from
+  # proto/. The script downloads and verifies the protoc release it pins.
+  generated:
+    name: generated code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Regenerate
+        env:
+          PROTOC_DOWNLOAD: "1"
+        run: scripts/generate.sh
+      - name: git diff
+        run: |
+          git diff --exit-code
+          untracked="$(git ls-files --others --exclude-standard)"
+          if [ -n "$untracked" ]; then
+            echo "Generation produced untracked files:"
+            echo "$untracked"
+            exit 1
+          fi

@@ -1,0 +1,158 @@
+// Copyright the laraedge-sdk authors. Licensed under the Apache License, Version 2.0.
+
+// Types shared by every service of protocol laraplate.edge.plugin.v1. They
+// mirror the data model of the agent. Field numbers are stable: never reuse or
+// renumber one, add new fields with new numbers.
+syntax = "proto3";
+
+package laraplate.edge.plugin.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/getlaraplate/laraedge-sdk/pluginv1;pluginv1";
+
+// Quality of a sample, mapped by the plugin from the errors of its device.
+enum Quality {
+  // Never valid on the wire.
+  QUALITY_UNSPECIFIED = 0;
+  // The value was read and can be trusted.
+  QUALITY_GOOD = 1;
+  // The value was read but may be stale or inexact.
+  QUALITY_UNCERTAIN = 2;
+  // The value could not be read.
+  QUALITY_BAD = 3;
+}
+
+// Priority class of a sample: which of the two buffer queues of the agent holds
+// it.
+enum Priority {
+  // Never valid on the wire.
+  PRIORITY_UNSPECIFIED = 0;
+  // States, alarms, counts, measurements and references.
+  PRIORITY_CRITICAL = 1;
+  // Process values.
+  PRIORITY_BULK = 2;
+}
+
+// Data type of a signal declared in a birth.
+enum DataType {
+  // Never valid on the wire.
+  DATA_TYPE_UNSPECIFIED = 0;
+  // A number (the samples carry double_value or int_value).
+  DATA_TYPE_NUMBER = 1;
+  // A boolean (the samples carry bool_value).
+  DATA_TYPE_BOOLEAN = 2;
+  // A string (the samples carry string_value).
+  DATA_TYPE_STRING = 3;
+}
+
+// Kind of a device event.
+enum EventKind {
+  // Never valid on the wire.
+  EVENT_KIND_UNSPECIFIED = 0;
+  // The device is announced and its signals are listed.
+  EVENT_KIND_BIRTH = 1;
+  // The driver lost the device.
+  EVENT_KIND_DEATH = 2;
+}
+
+// A reading: exactly one of the fields of kind is set.
+message Value {
+  oneof kind {
+    // A floating point value; NaN and infinities are refused by the agent.
+    double double_value = 1;
+    // An integer value.
+    int64 int_value = 2;
+    // A boolean value.
+    bool bool_value = 3;
+    // A string value.
+    string string_value = 4;
+  }
+}
+
+// One reading of one signal of one device.
+message Sample {
+  // Key of the device the sample belongs to.
+  string device = 1;
+  // Key of the signal.
+  string signal = 2;
+  // Instant of the reading (UTC).
+  google.protobuf.Timestamp ts = 3;
+  // The value read.
+  Value value = 4;
+  // Quality of the reading.
+  Quality quality = 5;
+  // Buffer class of the sample.
+  Priority priority = 6;
+}
+
+// Description of one signal in a birth.
+message SignalInfo {
+  // Key of the signal.
+  string signal = 1;
+  // Data type of the signal.
+  DataType data_type = 2;
+  // Unit of measure; empty when the signal has none.
+  string unit = 3;
+}
+
+// A device lifecycle event. Plugins never emit births or deaths: the agent
+// drives them. Events reach plugins inside records, in the batches of an output
+// and in the records of a processor.
+message DeviceEvent {
+  // Birth or death.
+  EventKind kind = 1;
+  // Key of the device.
+  string device = 2;
+  // Signals of the device; set for births only.
+  repeated SignalInfo signals = 3;
+  // Instant of the event (UTC).
+  google.protobuf.Timestamp ts = 4;
+}
+
+// What the buffer stores: exactly one of a sample or a device event.
+message Record {
+  oneof item {
+    // A reading.
+    Sample sample = 1;
+    // A device lifecycle event.
+    DeviceEvent device_event = 2;
+  }
+}
+
+// A range of samples of one class that the agent dropped.
+message LossMarker {
+  // Class of the dropped samples.
+  Priority priority = 1;
+  // Timestamp of the first dropped sample (UTC).
+  google.protobuf.Timestamp from = 2;
+  // Timestamp of the last dropped sample (UTC).
+  google.protobuf.Timestamp to = 3;
+  // Number of dropped samples.
+  uint64 count = 4;
+  // Why the samples were dropped, for example buffer_full or rejected_invalid.
+  string reason = 5;
+}
+
+// One problem found in a configuration. It never contains a value, secrets
+// included.
+message ConfigError {
+  // Path of the offending key, for example devices[0].points[1].address.
+  string path = 1;
+  // What is wrong, in words and without the value.
+  string message = 2;
+}
+
+// Request of Configure, shared by Input, Processor and Output.
+message ConfigureRequest {
+  // Identifier of the instance being configured.
+  string instance_id = 1;
+  // The section of the instance as JSON, with secrets resolved.
+  bytes config = 2;
+}
+
+// Response of Configure, shared by Input, Processor and Output.
+message ConfigureResponse {
+  // Problems found; empty when the configuration is accepted.
+  repeated ConfigError errors = 1;
+}

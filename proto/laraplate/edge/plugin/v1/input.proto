@@ -1,0 +1,100 @@
+// Copyright the laraedge-sdk authors. Licensed under the Apache License, Version 2.0.
+
+// The service of a plugin that offers inputs: it reads machines and hands the
+// samples to the agent.
+syntax = "proto3";
+
+package laraplate.edge.plugin.v1;
+
+import "laraplate/edge/plugin/v1/common.proto";
+
+option go_package = "github.com/getlaraplate/laraedge-sdk/pluginv1;pluginv1";
+
+// Reads machine data. Every request names the instance it is about.
+service Input {
+  // Configure validates and applies the configuration of an instance; the
+  // deadline is 10 seconds. A non-empty errors list means the configuration is
+  // refused.
+  rpc Configure(ConfigureRequest) returns (ConfigureResponse);
+  // Subscribe opens the stream of events of a configured instance. The plugin
+  // sends events until the stream is cancelled.
+  rpc Subscribe(SubscribeRequest) returns (stream InputEvent);
+  // Probe reads every point of the instance once; the deadline is 30 seconds.
+  rpc Probe(ProbeRequest) returns (ProbeResponse);
+  // Browse lists the nodes below a node. Optional: a plugin without it answers
+  // UNIMPLEMENTED.
+  rpc Browse(BrowseRequest) returns (BrowseResponse);
+}
+
+// Request of Subscribe.
+message SubscribeRequest {
+  // Identifier of the instance.
+  string instance_id = 1;
+}
+
+// The device answered, also when it has no new samples.
+message Answered {
+  // Key of the device that answered.
+  string device = 1;
+}
+
+// Health of the connection to the machines of the instance.
+message Health {
+  // Whether the instance is connected.
+  bool connected = 1;
+  // Kind of the last read error: timeout, connection, exception or decode; empty
+  // when the last read succeeded.
+  string read_error = 2;
+}
+
+// One event of the Subscribe stream. Plugins never emit births or deaths.
+message InputEvent {
+  oneof event {
+    // A reading.
+    Sample sample = 1;
+    // A device answered.
+    Answered answered = 2;
+    // The connection health changed.
+    Health health = 3;
+  }
+}
+
+// Request of Probe.
+message ProbeRequest {
+  // Identifier of the instance.
+  string instance_id = 1;
+}
+
+// Response of Probe.
+message ProbeResponse {
+  // One sample per point.
+  repeated Sample samples = 1;
+}
+
+// Request of Browse.
+message BrowseRequest {
+  // Identifier of the instance.
+  string instance_id = 1;
+  // Node to list below; empty for the root.
+  string node = 2;
+  // How many levels to descend; zero lists the children only.
+  uint32 depth = 3;
+}
+
+// A node found by Browse.
+message Node {
+  // Address of the node, usable as the address of a point.
+  string address = 1;
+  // Display name of the node.
+  string name = 2;
+  // Data type of the node as the plugin names it.
+  string type = 3;
+  // Access of the node, for example read or read_write.
+  string access = 4;
+}
+
+// Response of Browse.
+message BrowseResponse {
+  // The nodes found.
+  repeated Node nodes = 1;
+}
