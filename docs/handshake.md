@@ -58,13 +58,15 @@ The Go SDK uses exit code 2 when the command line cannot be parsed and exit code
 
 ### Unix (Linux and other Unix systems)
 
-- The host creates the socket directory with mode `0700` when it is missing and narrows it to `0700` when it is wider.
+- The host creates the socket directory with mode `0700` when it is missing and resets it to `0700` whenever its mode
+  is anything else.
   It refuses a directory that is a symbolic link or belongs to another user. Before each launch it removes every
   `*.sock` file left in the directory.
 - The plugin binds a Unix stream socket named `p<8 random lowercase hex digits>.sock` directly inside the socket
   directory, then sets the mode of the socket file to `0600` (after the bind, so it does not depend on the umask).
-  The name must match this pattern: the removal of leftovers by the host relies on the `.sock` extension, and the
-  conformance check `restart` fails when a killed plugin's socket survives the next launch.
+  The host checks only that the socket is directly inside the directory and is a socket, not the name; but the name
+  must end in `.sock` (the Go SDK uses `p<8 hex>.sock`), because the removal of leftovers by the host relies on the
+  extension and the conformance check `restart` fails when a killed plugin's socket survives the next launch.
 - The whole socket path must not exceed the size of `sun_path` of the platform minus one: 107 bytes on Linux (the
   size is 108), 103 on darwin and the BSDs (104). A longer path is an error: the Go SDK exits with a message that
   names the length and the limit, and the host refuses the socket directory in the same case before it starts the
@@ -77,7 +79,8 @@ The Go SDK uses exit code 2 when the command line cannot be parsed and exit code
 - The plugin listens on a named pipe `\\.\pipe\laraedge-<pid>-<8 random lowercase hex digits>`, where `<pid>` is the
   plugin's process id. No socket directory is involved.
 - The pipe has a protected DACL with exactly one entry that allows full access to the user of the plugin process: the
-  security descriptor `D:P(A;;GA;;;<SID of the current user>)`. The Go SDK creates it with go-winio. The conformance
+  security descriptor `D:P(A;;GA;;;<SID of the current user>)`. The Go SDK creates it with go-winio. The pipe is a byte-mode pipe that the plugin reads and writes (duplex)
+  and that rejects remote clients (`FILE_PIPE_REJECT_REMOTE_CLIENTS`), which is how go-winio creates it. The conformance
   check `permissions` reads the descriptor and fails when the DACL is not protected, has more than one entry, is not an
   allow entry, names another SID or does not grant full access.
 
@@ -96,8 +99,11 @@ address   = the socket path (unix) | the pipe name (npipe)
 
 How the host reads it (`handshake/host.go`):
 
-- It reads the first line of stdout, at most 4096 bytes. The line must end with LF; a CR before the LF is tolerated.
-  A longer line, or one without LF, is a bad line.
+- It reads the first line of stdout through a buffer of 4096 bytes. The line must end with LF within those 4096 bytes
+  (the LF included); a CR before the LF is tolerated. Outcomes: a line of 4096 bytes or more without an LF is a bad
+  handshake line and the plugin is killed; a shorter text without an LF is not a line yet, so the host keeps waiting
+  and the handshake ends at the timeout (or, when stdout closes, with the plugin's exit error if it exited). So end the
+  line with LF and flush it at once.
 - The text is split on the first three `|`; everything after the third belongs to `address`. There must be four
   fields and the first must be `1`.
 - `protocol` must be one of the protocols the host offered, compared as a string.
@@ -118,7 +124,11 @@ What the host verifies in `address`:
 After the check the host connects with gRPC over that address, without TLS, with a limit of 16 MB (16 777 216
 bytes) on every message in both directions, and waits until the connection is ready.
 
-## stdout and stderr after the handshake
+## stdin, stdout and stderr
+
+Stdin is the null device: the host gives the plugin no input, so the plugin must not read from it.
+
+### After the handshake
 
 The line is the only protocol use of stdout. Anything the plugin writes to stdout after it, and everything it writes
 to stderr, goes to the writers the host configured; the host discards them when it configured none. The host reads
@@ -135,7 +145,7 @@ All services are on the one connection. `Plugin` and `grpc.health.v1.Health` are
 | `Plugin` | `Info` | 5 s | Identity and manifest. |
 | `Plugin` | `Shutdown` | carries its own `deadline` | See [Shutdown](#shutdown). |
 | `Input` | `Configure` | 10 s | Per instance. |
-| `Input` | `Subscribe` (server stream) | none | Events until the stream is cancelled. |
+| `Input` | `Subscribe` (server stream) | none | Events until the stream is cancelled; see below. |
 | `Input` | `Probe` | 30 s | Every point once. |
 | `Input` | `Browse` | none fixed | Optional: `UNIMPLEMENTED` when the plugin does not browse. |
 | `Processor` | `Configure` | 10 s | Per instance. |
@@ -148,7 +158,12 @@ author's code through its `context`).
 
 Every call of `Input`, `Processor` and `Output` names the `instance_id` it is about (`Process` does so in its first
 message, the `ProcessStart`). The host configures one instance per section of its configuration and then addresses it
-by that identifier. Instances of one plugin are independent.
+by that identifier. Instances of one plugin are independent and the host may use them, and call different RPCs,
+concurrently: for example `Probe` while a `Subscribe` stream of the same instance runs, or the `Configure` of one
+instance while another streams. The conformance suite configures every fixture on its own instance
+(`conformance-<kind>-valid-<n>` and `conformance-<kind>-invalid-<n>`, which is not the `id` of the section), so a
+plugin must tolerate many configured instances at once. The Go SDK does not serialise `Send`, `Probe` and `Browse`
+against a new `Configure` of the same instance.
 
 ### Configure
 
@@ -170,7 +185,9 @@ so that a newer agent can add some; do likewise.
 
 `Subscribe` sends `InputEvent`s of three kinds: `sample`, `answered(device)` (the device answered, also when it had no
 new samples) and `health(connected, read_error)`, where `read_error` is empty or one of `timeout`, `connection`,
-`exception`, `decode`. A plugin never sends births or deaths: the agent derives them. A sample carries the device and
+`exception`, `decode`. When the stream is cancelled (or the plugin is shutting down) the handler returns normally, with status OK and not
+with an error; an error from `Run` ends the stream with that error. A plugin never sends births or deaths: the agent
+derives them. A sample carries the device and
 signal keys, a UTC timestamp, exactly one value (`double`, `int`, `bool` or `string`; NaN and infinities are refused),
 a quality (`GOOD`, `UNCERTAIN`, `BAD`) and a priority (`CRITICAL`, `BULK`). The `UNSPECIFIED` enum values are never
 valid on the wire.
@@ -208,8 +225,9 @@ Not part of the wire contract, but what a host can observe from a Go plugin:
   last `Configure` was refused; an empty `instance_id` gets `INVALID_ARGUMENT`.
 - A new `Configure` of an instance cancels its running stream first; a refused `Configure` leaves the instance
   unconfigured.
-- A panic in the author's code fails that one call with `INTERNAL`, writes one line to stderr (the type of the panic,
-  never request data) and the plugin keeps serving.
+- A panic in the author's code fails that one call with `INTERNAL`, writes one line to stderr (the type of the panic and,
+  for a Go runtime error such as an index out of range, the text of that error; never request data) and the plugin
+  keeps serving.
 - Messages are limited to 16 MB in both directions.
 
 ## Info and the manifest
@@ -237,7 +255,7 @@ The conformance check `info` makes these comparisons and also requires that the 
 - Numbers exactly as written (`1.0` stays `1.0`, `1e2` stays `1e2`).
 - Strings in UTF-8 with only the escapes JSON requires: `\"`, `\\`, `\b`, `\f`, `\n`, `\r`, `\t` and `\u00xx` (lower-case
   hexadecimal) for the other characters below U+0020. Every other character, `/` and U+007F included, is written
-  as itself, and an escape such as `é` in the input is decoded and written as the character.
+  as itself, and an escape such as `\u00e9` in the input is decoded and written as the character itself (a literal e with acute accent).
 
 ### `--manifest`
 
@@ -313,8 +331,30 @@ the plugin offers, and no others:
 - A valid processor section may carry an optional member `records`: the records the suite sends to `Process`, in
   order. The suite removes it before `Configure`, since the agent never sends it. Without it the suite sends synthetic
   records, and a processor that emits nothing for them fails `processor.signals` with a message asking the author to
-  supply `records`. The shape of the records is in the documentation of package `conformance` (`go doc
-  ./conformance`).
+  supply `records`. Only the `records` of the **first** valid processor section are used.
+
+### The `records` list
+
+Each element holds exactly one of `sample` and `device_event`. Unknown members anywhere in the list are refused, and
+so is an empty list.
+
+```json
+"records": [
+  {"device_event": {"kind": "birth", "device": "press-1",
+                    "signals": [{"signal": "state", "data_type": "number", "unit": ""}]}},
+  {"sample": {"device": "press-1", "signal": "state", "value": {"int": 3},
+              "quality": "good", "priority": "critical", "ts": "2026-10-23T10:00:00Z"}}
+]
+```
+
+- `sample`: `device` and `signal` are required. `value` holds exactly one of `int`, `float`, `bool` and `string`.
+  `quality` is `good` (default), `uncertain` or `bad`. `priority` is `critical` (default) or `bulk`. `ts` is an RFC 3339
+  timestamp; without it the suite stamps the record at the start of the check plus one millisecond per position in the
+  list.
+- `device_event`: `kind` is `birth` or `death`, `device` is required, `signals` lists the signals of a birth (each with
+  `signal` and a `data_type` of `number`, `boolean` or `string`, and an optional `unit`), `ts` as above.
+- Without `records` the suite sends a birth of every observed device (announcing the declared signal names), then three
+  rounds of integer samples 1, 2 and 3 of every declared signal name on every observed device.
 
 The examples in [`examples/`](../examples/README.md) have a `conformance.json` each.
 
@@ -359,10 +399,31 @@ expect that a plugin whose host disappears is ended by the operating system on L
 
 ## The conformance suite
 
-`laraedge-conformance <plugin dir>` (package `conformance`) runs the host side of everything above against your
-binary, as the agent would. It checks, in order: `manifest`, `fixtures`, `no-cookie`, `handshake`, `permissions`, `info`,
-`health`, the checks of each offered kind (`input.configure`, `input.stream`, `input.probe`; `processor.configure`,
-`processor.signals`; `output.configure`, `output.send`, `output.duplicate`), `shutdown` and `restart` (a `kill -9` and a
-new launch with the same socket directory must perform a new handshake on a new address). The exit code is 0 when every
-check passed, 1 when one failed and 2 on a usage error. A check that cannot run because one it builds on failed is
-reported as failed with a detail that starts with `not run:`; the suite never passes a check it did not perform.
+`laraedge-conformance [-timeout 10s] [-v] <plugin dir>` (package `conformance`) runs the host side of everything above
+against your binary, as the agent would. The exit code is 0 when every check passed, 1 when one failed and 2 on a
+usage error. `-timeout` (default 10 s) bounds the waits the protocol does not fix: the exit of a plugin started
+without the cookie, the connection after the handshake, the first event of an input stream, the end of a cancelled
+stream, the samples of a processor. `-v` copies the plugin's output to stderr. A check that cannot run because one it
+builds on failed is reported as failed with a detail that starts with `not run:`; the suite never passes a check it
+did not perform. Every process the suite starts has a minimal environment (`PATH`, `TZ`, and `SystemRoot` on Windows)
+and its working directory and socket directory in fresh temporary directories.
+
+What each check requires, in report order:
+
+| Check | Requirement |
+|---|---|
+| `manifest` | `plugin.json` loads, passes the manifest check, and the binary `<name>` (`<name>.exe` on Windows) is a regular file next to it. |
+| `fixtures` | `conformance.json` is valid as described above; processor `records` parse. |
+| `no-cookie` | Started without the cookie (but with the protocols and a socket directory), the plugin exits with a non-zero code within the timeout and prints no line starting with `1|`. |
+| `handshake` | A valid handshake line within 10 s, then a gRPC connection that becomes ready within the timeout. |
+| `permissions` | Unix: the socket has mode 0600 and its directory 0700. Windows: the DACL rules above. |
+| `info` | `Info` answers within 5 s with the name, version and protocol versions of `plugin.json` (the list equal, in order), the negotiated protocol among them, and a manifest equal to `plugin.json` in canonical form. |
+| `health` | `Check` with the empty service name answers `SERVING` within 2 s. |
+| `<kind>.configure` | Every section is configured on its own instance, within 10 s. Every valid section is accepted (no errors in the response and no RPC error). Every invalid section is answered with at least one configuration error (an RPC error fails the check). The checks that follow need the first valid section to be accepted. |
+| `input.stream` | `Subscribe` on the first valid instance delivers an event (of any kind) within the timeout. While it is open, a second `Subscribe` of the same instance must be refused with an error (the protocol says `ALREADY_EXISTS`, and the suite reports the code it saw; a second stream that is served, or that ends OK without an event, fails). After the first stream is cancelled, a new `Subscribe` of the instance is served with an event within the timeout (retried every 50 ms), which proves that the first one ended. |
+| `input.probe` | `Probe` answers within 30 s with exactly one sample for each `(device, signal)` point of the first valid section, and no sample for any other pair. |
+| `processor.signals` | The first valid section must observe at least one device and declare at least one signal. The suite opens one `Process` stream, sends `start`, the records and then closes its side; the processor must emit at least one sample before the timeout, every sample must be of a declared `(device, signal)` pair, and the stream must not fail or end before the records were sent. The processor should end its stream when the agent closes its side. |
+| `output.send` | `Send` of one valid batch (one sample record, `source_seq` 1, a UUIDv7 `message_id`) answers within 30 s with one of the six outcomes. Which one is not judged. |
+| `output.duplicate` | The same batch sent twice (same `message_id`) is answered `ACCEPTED` or `DUPLICATE` both times. Not run when the first `Send` returned an error. |
+| `shutdown` | A health `Check` still answers; then `Shutdown` with a 5 s deadline (an `UNAVAILABLE` answer or EOF counts as an answer) and the plugin exits with code 0 within 5 s plus 1 s. |
+| `restart` | After a `kill -9`, a new launch with the same socket directory performs a new handshake on a different address; on Unix the old socket file is gone afterwards, removed by the host as a leftover `*.sock` file. |

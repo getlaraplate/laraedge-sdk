@@ -26,7 +26,7 @@ repository was built from is in [docs/superpowers/plans/INDEX.md](docs/superpowe
 ## Quick start
 
 A plugin is a Go program in a module that requires `github.com/getlaraplate/laraedge-sdk`. This one is an Input that
-reports the current Unix time as the signal `now` of a device `clock` (a little over 50 lines with the imports; the
+reports the current Unix time as the signal `now` of a device `clock` (about 60 lines with the imports; the
 logic is in `Configure`, `Probe` and `Run`):
 
 ```go
@@ -35,6 +35,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/getlaraplate/laraedge-sdk/manifest"
@@ -46,7 +47,11 @@ type clock struct{}
 
 func (clock) Configure(_ context.Context, _ string, raw json.RawMessage) []sdk.ConfigError {
 	if _, err := sdk.DecodeInput(raw); err != nil {
-		return []sdk.ConfigError{{Message: err.Error()}}
+		var ce sdk.ConfigError
+		if !errors.As(err, &ce) {
+			ce = sdk.ConfigError{Message: "the section cannot be decoded"}
+		}
+		return []sdk.ConfigError{ce}
 	}
 	return nil
 }
