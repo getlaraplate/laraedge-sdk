@@ -1,0 +1,39 @@
+{
+  "processor": {
+    "valid": [
+      {
+        "id": "line-state-valid-1",
+        "observe": ["press-1", "press-2"],
+        "devices": [
+          {"device": "line-1", "signals": [{"signal": "state", "type": "int", "priority": "critical"}]}
+        ],
+        "config": {}
+      }
+    ],
+    "invalid": [
+      {
+        "id": "line-state-invalid-no-observe",
+        "devices": [
+          {"device": "line-1", "signals": [{"signal": "state", "type": "int", "priority": "critical"}]}
+        ],
+        "config": {}
+      },
+      {
+        "id": "line-state-invalid-no-state-signal",
+        "observe": ["press-1"],
+        "devices": [
+          {"device": "line-1", "signals": [{"signal": "speed", "type": "int", "priority": "bulk"}]}
+        ],
+        "config": {}
+      },
+      {
+        "id": "line-state-invalid-config",
+        "observe": ["press-1"],
+        "devices": [
+          {"device": "line-1", "signals": [{"signal": "state", "type": "int", "priority": "critical"}]}
+        ],
+        "config": {"mode": "min"}
+      }
+    ]
+  }
+}

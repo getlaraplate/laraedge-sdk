@@ -1,0 +1,1 @@
+{"kinds":{"output":{"config_schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"path":{"minLength":1,"type":"string"}},"required":["path"],"type":"object"}}},"name":"jsonl","protocol_versions":["v1"],"version":"0.1.0"}

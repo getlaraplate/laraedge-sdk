@@ -1,0 +1,12 @@
+{
+  "output": {
+    "valid": [
+      {"id": "jsonl-valid-1", "config": {"path": "laraedge-jsonl-conformance.jsonl"}}
+    ],
+    "invalid": [
+      {"id": "jsonl-invalid-no-path", "config": {}},
+      {"id": "jsonl-invalid-empty-path", "config": {"path": ""}},
+      {"id": "jsonl-invalid-unknown-key", "config": {"path": "laraedge-jsonl-conformance.jsonl", "mode": "append"}}
+    ]
+  }
+}
