@@ -55,3 +55,39 @@ func TestCanonicalRefuses(t *testing.T) {
 		})
 	}
 }
+
+func TestCanonicalRefusesLossyText(t *testing.T) {
+	tests := []struct{ name, in string }{
+		{"invalid UTF-8 byte", "{\"a\":\"\xff\"}"},
+		{"invalid UTF-8 in a key", "{\"\xc3\":1}"},
+		{"lone high surrogate", `{"a":"\ud800"}`},
+		{"lone low surrogate", `{"a":"\udc00"}`},
+		{"high surrogate then other escape", `{"a":"\ud800A"}`},
+		{"high surrogate then text", `{"a":"\ud83dx"}`},
+		{"unpaired in a key", `{"\udfff":1}`},
+		{"surrogate after an escaped backslash", `{"a":"\\\ud800"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, err := manifest.Canonical([]byte(tt.in)); err == nil {
+				t.Fatalf("want an error, got %s", got)
+			}
+		})
+	}
+}
+
+func TestCanonicalKeepsValidSurrogatesAndLookalikes(t *testing.T) {
+	tests := []struct{ name, in, want string }{
+		{"valid pair", `{"a":"😀"}`, `{"a":"😀"}`},
+		{"escaped backslash before u", `{"a":"\\ud800"}`, `{"a":"\\ud800"}`},
+		{"surrogate text outside strings is not scanned", `{"a":"x"}`, `{"a":"x"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := manifest.Canonical([]byte(tt.in))
+			if err != nil || string(got) != tt.want {
+				t.Fatalf("got %s, %v; want %s", got, err, tt.want)
+			}
+		})
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"unicode/utf8"
 )
 
 // maxCanonicalDepth bounds the nesting Canonical accepts.
@@ -15,9 +16,16 @@ const maxCanonicalDepth = 512
 // Canonical returns the canonical form of a JSON document (decision S2): object keys sorted
 // at every depth in the byte order of their UTF-8 encoding, no insignificant whitespace,
 // numbers exactly as written, strings in UTF-8 with only the escapes JSON requires. It
-// refuses a document that is not exactly one JSON value, that repeats a key in an object
+// refuses input that is not valid UTF-8, a string with an unpaired surrogate escape (both would
+// otherwise collapse into U+FFFD and make different documents compare equal), a document that is not exactly one JSON value, that repeats a key in an object
 // or that nests deeper than 512 levels.
 func Canonical(raw []byte) ([]byte, error) {
+	if !utf8.Valid(raw) {
+		return nil, errors.New("canonical json: input is not valid UTF-8")
+	}
+	if err := checkSurrogateEscapes(raw); err != nil {
+		return nil, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 
@@ -159,4 +167,69 @@ func writeCanonicalString(out *bytes.Buffer, s string) {
 		}
 	}
 	out.WriteByte('"')
+}
+
+// checkSurrogateEscapes refuses \uD800-\uDFFF escapes that are not a high surrogate
+// immediately followed by a low one. Malformed escapes are left to the JSON decoder.
+func checkSurrogateEscapes(raw []byte) error {
+	inString := false
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if !inString {
+			inString = c == '"'
+			continue
+		}
+		switch c {
+		case '"':
+			inString = false
+		case '\\':
+			if i+1 >= len(raw) {
+				return nil
+			}
+			if raw[i+1] != 'u' {
+				i++
+				continue
+			}
+			unit, ok := hexUnit(raw, i+2)
+			if !ok {
+				return nil
+			}
+			i += 5
+			switch {
+			case unit >= 0xdc00 && unit <= 0xdfff:
+				return errSurrogate
+			case unit >= 0xd800 && unit <= 0xdbff:
+				if i+2 < len(raw) && raw[i+1] == '\\' && raw[i+2] == 'u' {
+					if low, ok := hexUnit(raw, i+3); ok && low >= 0xdc00 && low <= 0xdfff {
+						i += 6
+						continue
+					}
+				}
+				return errSurrogate
+			}
+		}
+	}
+	return nil
+}
+
+var errSurrogate = errors.New("canonical json: unpaired surrogate escape in a string")
+
+func hexUnit(raw []byte, at int) (int, bool) {
+	if at+4 > len(raw) {
+		return 0, false
+	}
+	unit := 0
+	for _, c := range raw[at : at+4] {
+		switch {
+		case c >= '0' && c <= '9':
+			unit = unit<<4 | int(c-'0')
+		case c >= 'a' && c <= 'f':
+			unit = unit<<4 | int(c-'a'+10)
+		case c >= 'A' && c <= 'F':
+			unit = unit<<4 | int(c-'A'+10)
+		default:
+			return 0, false
+		}
+	}
+	return unit, true
 }

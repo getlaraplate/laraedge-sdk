@@ -74,11 +74,74 @@ func Load(path string) (Manifest, []byte, error) {
 	if err != nil {
 		return Manifest{}, nil, fmt.Errorf("read manifest: %w", err)
 	}
+	if _, err := Canonical(raw); err != nil {
+		return Manifest{}, nil, fmt.Errorf("manifest %s: %w", path, err)
+	}
+	if err := checkFieldNames(raw); err != nil {
+		return Manifest{}, nil, fmt.Errorf("manifest %s: %w", path, err)
+	}
 	var m Manifest
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return Manifest{}, nil, fmt.Errorf("decode manifest %s: %w", path, err)
 	}
 	return m, raw, nil
+}
+
+// fieldNames lists, per object level of plugin.json, the key names that carry meaning.
+var fieldNames = map[string][]string{
+	"":          {"name", "version", "protocol_versions", "kinds"},
+	"kinds":     {"input", "processor", "output"},
+	"input":     {"connection_schema", "address_schema", "read_modes", "types", "browse"},
+	"processor": {"config_schema"},
+	"output":    {"config_schema"},
+}
+
+// checkFieldNames refuses a key that differs from a field name only by case. The JSON
+// decoder would match it to the field while Canonical, and so the hash comparison of the
+// host, sees a different key. Keys that match no field are ignored.
+func checkFieldNames(raw []byte) error {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return errors.New("the manifest is not a JSON object")
+	}
+	if err := checkLevel("", top); err != nil {
+		return err
+	}
+	var kinds map[string]json.RawMessage
+	if json.Unmarshal(top["kinds"], &kinds) != nil {
+		return nil
+	}
+	if err := checkLevel("kinds", kinds); err != nil {
+		return err
+	}
+	for _, name := range fieldNames["kinds"] {
+		var level map[string]json.RawMessage
+		if json.Unmarshal(kinds[name], &level) != nil {
+			continue
+		}
+		if err := checkLevel(name, level); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func checkLevel(level string, members map[string]json.RawMessage) error {
+	for key := range members {
+		if slices.Contains(fieldNames[level], key) {
+			continue
+		}
+		for _, name := range fieldNames[level] {
+			if strings.EqualFold(key, name) {
+				where := "the manifest"
+				if level != "" {
+					where = level
+				}
+				return fmt.Errorf("%s: key differs from %q only by case", where, name)
+			}
+		}
+	}
+	return nil
 }
 
 // Check returns the reasons the manifest is not acceptable, empty when it is.
@@ -194,7 +257,7 @@ func (m Manifest) ValidateInput(section json.RawMessage) []Problem {
 			}
 		}
 	}
-	return problems
+	return sortProblems(problems)
 }
 
 // ValidateProcessor checks a processor section's config against config_schema.
@@ -222,7 +285,7 @@ func validateConfigSection(schemaPath string, schema, section json.RawMessage) [
 	if !ok {
 		config = map[string]any{}
 	}
-	return validateAgainst(schemaPath, schema, "config", config)
+	return sortProblems(append(problems, validateAgainst(schemaPath, schema, "config", config)...))
 }
 
 func decodeSection(section json.RawMessage) (map[string]any, []Problem) {
@@ -251,6 +314,18 @@ func readMode(read any) string {
 		}
 	}
 	return ""
+}
+
+// sortProblems orders problems by path then message, so the result does not depend on the
+// order the schema library walks properties in.
+func sortProblems(problems []Problem) []Problem {
+	slices.SortFunc(problems, func(a, b Problem) int {
+		if c := strings.Compare(a.Path, b.Path); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Message, b.Message)
+	})
+	return problems
 }
 
 func appendUnique(problems []Problem, p Problem) []Problem {
@@ -291,7 +366,7 @@ func schemaProblems(schema *jsonschema.Schema, instancePath string, instance any
 		}
 		problems = appendUnique(problems, Problem{Path: path, Message: keywordMessage(leaf.ErrorKind)})
 	})
-	return problems
+	return sortProblems(problems)
 }
 
 func collectLeaves(e *jsonschema.ValidationError, visit func(*jsonschema.ValidationError)) {

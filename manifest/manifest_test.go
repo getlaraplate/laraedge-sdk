@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -329,5 +330,76 @@ func TestValidateWithUncompilableSchema(t *testing.T) {
 	problems := m.ValidateOutput(json.RawMessage(`{"config":{}}`))
 	if len(problems) != 1 || problems[0].Path != "kinds.output.config_schema" {
 		t.Fatalf("%+v", problems)
+	}
+}
+
+func TestValidationOrderIsDeterministic(t *testing.T) {
+	m := mustManifest(t, `{"name":"x","version":"1","protocol_versions":["v1"],"kinds":{
+	  "processor":{"config_schema":{"type":"object","properties":{
+	    "a":{"type":"integer"},"b":{"type":"integer"},"c":{"type":"integer"},
+	    "d":{"type":"integer"},"e":{"type":"integer"},"f":{"type":"integer"}}}},
+	  "input":{"connection_schema":{"type":"object","properties":{
+	    "a":{"type":"integer"},"b":{"type":"integer"},"c":{"type":"integer"},
+	    "d":{"type":"integer"},"e":{"type":"integer"},"f":{"type":"integer"}}},
+	    "address_schema":{"type":"string"},"read_modes":["poll"],"types":["bool"]}}}`)
+	const bad = `{"a":"x","b":"x","c":"x","d":"x","e":"x","f":"x"}`
+	processor := json.RawMessage(`{"config":` + bad + `}`)
+	input := json.RawMessage(`{"connection":` + bad + `,"devices":[]}`)
+
+	wantProcessor := m.ValidateProcessor(processor)
+	wantInput := m.ValidateInput(input)
+	if len(wantProcessor) != 6 || len(wantInput) != 6 {
+		t.Fatalf("want 6 problems each, got %d and %d", len(wantProcessor), len(wantInput))
+	}
+	for i, p := range wantProcessor {
+		if want := "config." + string(rune('a'+i)); p.Path != want {
+			t.Fatalf("processor problem %d: path %s, want %s", i, p.Path, want)
+		}
+	}
+	for run := 0; run < 200; run++ {
+		if got := m.ValidateProcessor(processor); !reflect.DeepEqual(got, wantProcessor) {
+			t.Fatalf("run %d: processor order changed:\n%+v\n%+v", run, got, wantProcessor)
+		}
+		if got := m.ValidateInput(input); !reflect.DeepEqual(got, wantInput) {
+			t.Fatalf("run %d: input order changed:\n%+v\n%+v", run, got, wantInput)
+		}
+	}
+}
+
+func TestLoadRefusesAmbiguousManifests(t *testing.T) {
+	tests := []struct{ name, doc string }{
+		{"top-level key in other case", `{"Name":"a","version":"1","protocol_versions":["v1"],"kinds":{"output":{"config_schema":{}}}}`},
+		{"upper case protocol_versions", `{"name":"a","version":"1","PROTOCOL_VERSIONS":["v1"],"kinds":{"output":{"config_schema":{}}}}`},
+		{"duplicate name", `{"name":"a","name":"b","version":"1","protocol_versions":["v1"],"kinds":{"output":{"config_schema":{}}}}`},
+		{"kinds key in other case", `{"name":"a","version":"1","protocol_versions":["v1"],"Kinds":{"output":{"config_schema":{}}}}`},
+		{"kind name in other case", `{"name":"a","version":"1","protocol_versions":["v1"],"kinds":{"Output":{"config_schema":{}}}}`},
+		{"input field in other case", `{"name":"a","version":"1","protocol_versions":["v1"],"kinds":{"input":{"Connection_Schema":{},"address_schema":{},"read_modes":["poll"],"types":["bool"]}}}`},
+		{"output field in other case", `{"name":"a","version":"1","protocol_versions":["v1"],"kinds":{"output":{"CONFIG_SCHEMA":{}}}}`},
+		{"processor field in other case", `{"name":"a","version":"1","protocol_versions":["v1"],"kinds":{"processor":{"Config_Schema":{}}}}`},
+		{"invalid UTF-8", "{\"name\":\"a\xff\",\"version\":\"1\",\"protocol_versions\":[\"v1\"],\"kinds\":{\"output\":{\"config_schema\":{}}}}"},
+		{"lone surrogate", `{"name":"a","version":"\ud800","protocol_versions":["v1"],"kinds":{"output":{"config_schema":{}}}}`},
+		{"trailing data", `{"name":"a","version":"1","protocol_versions":["v1"],"kinds":{"output":{"config_schema":{}}}} {}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "plugin.json")
+			if err := os.WriteFile(path, []byte(tt.doc), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if m, _, err := manifest.Load(path); err == nil {
+				t.Fatalf("want an error, got %+v", m)
+			}
+		})
+	}
+}
+
+func TestLoadAcceptsDifferentlyNamedKeysInsideSchemas(t *testing.T) {
+	doc := `{"name":"a","version":"1","protocol_versions":["v1"],"extra":1,"kinds":{"output":{"config_schema":{"type":"object","properties":{"Name":{},"name":{}}}}}}`
+	path := filepath.Join(t.TempDir(), "plugin.json")
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manifest.Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
 	}
 }
