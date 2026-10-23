@@ -1,0 +1,44 @@
+# Contributing
+
+Thank you for helping with the laraedge SDK.
+
+## Contributor License Agreement
+
+Every contributor must sign the CLA before a pull request can be merged. You do not need to do anything in advance:
+when you open a pull request, the CLA workflow comments on it with the instructions, and the pull request stays blocked
+until the agreement is signed. The workflow is shared by all `getlaraplate` repositories, so you sign once.
+
+## Workflow
+
+- Fork the repository and branch from `develop`. Changes reach `main` through a pull request.
+- Keep a pull request to one subject, with tests.
+- Commit messages follow the conventional style of the repository history (`feat(handshake): ...`, `fix(sdk): ...`,
+  `docs: ...`).
+
+## Go conventions
+
+- Go 1.27, as in `go.mod`. No CGO.
+- Standard library first. A new dependency needs a permissive licence (Apache-2.0, BSD-2-Clause, BSD-3-Clause, MIT or
+  ISC) and a reason in the pull request. The `dependency licences` CI job enforces the licence list.
+- The module must never import `github.com/getlaraplate/laraedge` (the AGPL agent), and no AGPL code may be copied in.
+- Exported identifiers carry a doc comment. Errors are wrapped with context; configuration errors never contain a
+  value, because values can be secrets.
+- Tests are table-driven, use fakes rather than mocks, and never synchronise with sleeps.
+- Generated code (`pluginv1/`) is committed and never edited by hand; regenerate it with `scripts/generate.sh`.
+
+## Checks to run before pushing
+
+```bash
+gofmt -l .                # must print nothing
+go vet ./...
+GOOS=windows go vet ./...
+go test -race ./...
+GOARCH=386 go test ./...
+```
+
+CI runs the same checks on Linux amd64 and arm64 and on Windows amd64, plus an armv7 build, `govulncheck` and the
+dependency licence check.
+
+## Security
+
+Do not report vulnerabilities in public issues. See [SECURITY.md](SECURITY.md).
