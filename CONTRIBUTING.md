@@ -24,7 +24,12 @@ until the agreement is signed. The workflow is shared by all `getlaraplate` repo
 - Exported identifiers carry a doc comment. Errors are wrapped with context; configuration errors never contain a
   value, because values can be secrets.
 - Tests are table-driven, use fakes rather than mocks, and never synchronise with sleeps.
-- Generated code (`pluginv1/`) is committed and never edited by hand; regenerate it with `scripts/generate.sh`.
+- Generated code (`pluginv1/`) is committed and never edited by hand. It comes from the `.proto` files in `proto/`:
+  change those, then regenerate with `scripts/generate.sh`, which needs `protoc` 36.1 on `PATH` and fails on any other
+  version. The `generated code` CI job regenerates it with the pinned release and fails when the result differs from
+  what is committed. Field numbers are stable: never reuse or renumber one.
+- A change to the protocol, the handshake or the formats of `plugin.json` and `conformance.json` updates
+  [docs/handshake.md](docs/handshake.md) in the same pull request.
 
 ## Checks to run before pushing
 
@@ -36,8 +41,9 @@ go test -race ./...
 GOARCH=386 go test ./...
 ```
 
-CI runs the same checks on Linux amd64 and arm64 and on Windows amd64, plus an armv7 build, `govulncheck` and the
-dependency licence check.
+CI runs vet and `go test -race ./...` on Linux amd64 and arm64 and on Windows amd64, the conformance suite on the
+three example plugins on the same three platforms, a 32-bit (386) test run and an armv7 cross build on Linux,
+`govulncheck`, the dependency licence check and the generated code check.
 
 ## Security
 
