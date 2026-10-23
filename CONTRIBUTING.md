@@ -27,7 +27,10 @@ until the agreement is signed. The workflow is shared by all `getlaraplate` repo
 - Generated code (`pluginv1/`) is committed and never edited by hand. It comes from the `.proto` files in `proto/`:
   change those, then regenerate with `scripts/generate.sh`, which needs `protoc` 36.1 on `PATH` and fails on any other
   version. The `generated code` CI job regenerates it with the pinned release and fails when the result differs from
-  what is committed. Field numbers are stable: never reuse or renumber one.
+  what is committed. Field numbers are stable: never reuse or renumber one. `pluginv1/testdata/descriptors.golden`
+  pins the number, name, type and oneof of every field, the enum values and the methods, so a renumbering fails the
+  tests even when it is regenerated; after a compatible addition rewrite it with
+  `go test ./pluginv1 -run TestDescriptorsMatchTheGolden -update-descriptors` and commit it with the generated code.
 - A change to the protocol, the handshake or the formats of `plugin.json` and `conformance.json` updates
   [docs/handshake.md](docs/handshake.md) in the same pull request.
 
