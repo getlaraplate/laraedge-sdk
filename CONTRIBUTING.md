@@ -10,7 +10,7 @@ until the agreement is signed. The workflow is shared by all `getlaraplate` repo
 
 ## Workflow
 
-- Fork the repository and branch from `develop`. Changes reach `main` through a pull request.
+- Fork the repository and branch from `develop`. Changes reach `master` through a pull request.
 - Keep a pull request to one subject, with tests.
 - Commit messages follow the conventional style of the repository history (`feat(handshake): ...`, `fix(sdk): ...`,
   `docs: ...`).

@@ -13,7 +13,7 @@ time for a fix before disclosing the problem publicly.
 
 ## Supported versions
 
-The SDK has no stable release yet. Fixes are made on `main`.
+The SDK has no stable release yet. Fixes are made on `master`.
 
 ## Scope
 
