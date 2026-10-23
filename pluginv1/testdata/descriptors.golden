@@ -1,0 +1,137 @@
+file laraplate/edge/plugin/v1/common.proto
+enum laraplate.edge.plugin.v1.Quality
+  0 QUALITY_UNSPECIFIED
+  1 QUALITY_GOOD
+  2 QUALITY_UNCERTAIN
+  3 QUALITY_BAD
+enum laraplate.edge.plugin.v1.Priority
+  0 PRIORITY_UNSPECIFIED
+  1 PRIORITY_CRITICAL
+  2 PRIORITY_BULK
+enum laraplate.edge.plugin.v1.DataType
+  0 DATA_TYPE_UNSPECIFIED
+  1 DATA_TYPE_NUMBER
+  2 DATA_TYPE_BOOLEAN
+  3 DATA_TYPE_STRING
+enum laraplate.edge.plugin.v1.EventKind
+  0 EVENT_KIND_UNSPECIFIED
+  1 EVENT_KIND_BIRTH
+  2 EVENT_KIND_DEATH
+message laraplate.edge.plugin.v1.Value
+  1 double_value optional double oneof kind
+  2 int_value optional int64 oneof kind
+  3 bool_value optional bool oneof kind
+  4 string_value optional string oneof kind
+message laraplate.edge.plugin.v1.Sample
+  1 device optional string
+  2 signal optional string
+  3 ts optional message google.protobuf.Timestamp
+  4 value optional message laraplate.edge.plugin.v1.Value
+  5 quality optional enum laraplate.edge.plugin.v1.Quality
+  6 priority optional enum laraplate.edge.plugin.v1.Priority
+message laraplate.edge.plugin.v1.SignalInfo
+  1 signal optional string
+  2 data_type optional enum laraplate.edge.plugin.v1.DataType
+  3 unit optional string
+message laraplate.edge.plugin.v1.DeviceEvent
+  1 kind optional enum laraplate.edge.plugin.v1.EventKind
+  2 device optional string
+  3 signals repeated message laraplate.edge.plugin.v1.SignalInfo
+  4 ts optional message google.protobuf.Timestamp
+message laraplate.edge.plugin.v1.Record
+  1 sample optional message laraplate.edge.plugin.v1.Sample oneof item
+  2 device_event optional message laraplate.edge.plugin.v1.DeviceEvent oneof item
+message laraplate.edge.plugin.v1.LossMarker
+  1 priority optional enum laraplate.edge.plugin.v1.Priority
+  2 from optional message google.protobuf.Timestamp
+  3 to optional message google.protobuf.Timestamp
+  4 count optional uint64
+  5 reason optional string
+message laraplate.edge.plugin.v1.ConfigError
+  1 path optional string
+  2 message optional string
+message laraplate.edge.plugin.v1.ConfigureRequest
+  1 instance_id optional string
+  2 config optional bytes
+message laraplate.edge.plugin.v1.ConfigureResponse
+  1 errors repeated message laraplate.edge.plugin.v1.ConfigError
+file laraplate/edge/plugin/v1/input.proto
+message laraplate.edge.plugin.v1.SubscribeRequest
+  1 instance_id optional string
+message laraplate.edge.plugin.v1.Answered
+  1 device optional string
+message laraplate.edge.plugin.v1.Health
+  1 connected optional bool
+  2 read_error optional string
+message laraplate.edge.plugin.v1.InputEvent
+  1 sample optional message laraplate.edge.plugin.v1.Sample oneof event
+  2 answered optional message laraplate.edge.plugin.v1.Answered oneof event
+  3 health optional message laraplate.edge.plugin.v1.Health oneof event
+message laraplate.edge.plugin.v1.ProbeRequest
+  1 instance_id optional string
+message laraplate.edge.plugin.v1.ProbeResponse
+  1 samples repeated message laraplate.edge.plugin.v1.Sample
+message laraplate.edge.plugin.v1.BrowseRequest
+  1 instance_id optional string
+  2 node optional string
+  3 depth optional uint32
+message laraplate.edge.plugin.v1.Node
+  1 address optional string
+  2 name optional string
+  3 type optional string
+  4 access optional string
+message laraplate.edge.plugin.v1.BrowseResponse
+  1 nodes repeated message laraplate.edge.plugin.v1.Node
+service laraplate.edge.plugin.v1.Input
+  rpc Configure(laraplate.edge.plugin.v1.ConfigureRequest) returns (laraplate.edge.plugin.v1.ConfigureResponse)
+  rpc Subscribe(laraplate.edge.plugin.v1.SubscribeRequest) returns (stream laraplate.edge.plugin.v1.InputEvent)
+  rpc Probe(laraplate.edge.plugin.v1.ProbeRequest) returns (laraplate.edge.plugin.v1.ProbeResponse)
+  rpc Browse(laraplate.edge.plugin.v1.BrowseRequest) returns (laraplate.edge.plugin.v1.BrowseResponse)
+file laraplate/edge/plugin/v1/output.proto
+enum laraplate.edge.plugin.v1.Outcome
+  0 OUTCOME_UNSPECIFIED
+  1 OUTCOME_ACCEPTED
+  2 OUTCOME_DUPLICATE
+  3 OUTCOME_RETRY_AFTER
+  4 OUTCOME_SPLIT
+  5 OUTCOME_REJECT_INVALID
+  6 OUTCOME_SUSPEND_AUTH
+message laraplate.edge.plugin.v1.Batch
+  1 message_id optional string
+  2 source_seq optional uint64
+  3 records repeated message laraplate.edge.plugin.v1.Record
+  4 losses repeated message laraplate.edge.plugin.v1.LossMarker
+message laraplate.edge.plugin.v1.SendRequest
+  1 instance_id optional string
+  2 batch optional message laraplate.edge.plugin.v1.Batch
+message laraplate.edge.plugin.v1.SendResult
+  1 outcome optional enum laraplate.edge.plugin.v1.Outcome
+  2 retry_after optional message google.protobuf.Duration
+  3 reason optional string
+service laraplate.edge.plugin.v1.Output
+  rpc Configure(laraplate.edge.plugin.v1.ConfigureRequest) returns (laraplate.edge.plugin.v1.ConfigureResponse)
+  rpc Send(laraplate.edge.plugin.v1.SendRequest) returns (laraplate.edge.plugin.v1.SendResult)
+file laraplate/edge/plugin/v1/plugin.proto
+message laraplate.edge.plugin.v1.InfoRequest
+message laraplate.edge.plugin.v1.InfoResponse
+  1 name optional string
+  2 version optional string
+  3 protocol_versions repeated string
+  4 manifest optional bytes
+message laraplate.edge.plugin.v1.ShutdownRequest
+  1 deadline optional message google.protobuf.Duration
+message laraplate.edge.plugin.v1.ShutdownResponse
+service laraplate.edge.plugin.v1.Plugin
+  rpc Info(laraplate.edge.plugin.v1.InfoRequest) returns (laraplate.edge.plugin.v1.InfoResponse)
+  rpc Shutdown(laraplate.edge.plugin.v1.ShutdownRequest) returns (laraplate.edge.plugin.v1.ShutdownResponse)
+file laraplate/edge/plugin/v1/processor.proto
+message laraplate.edge.plugin.v1.ProcessStart
+  1 instance_id optional string
+message laraplate.edge.plugin.v1.ProcessorIn
+  1 start optional message laraplate.edge.plugin.v1.ProcessStart oneof msg
+  2 record optional message laraplate.edge.plugin.v1.Record oneof msg
+message laraplate.edge.plugin.v1.ProcessorOut
+  1 sample optional message laraplate.edge.plugin.v1.Sample
+service laraplate.edge.plugin.v1.Processor
+  rpc Configure(laraplate.edge.plugin.v1.ConfigureRequest) returns (laraplate.edge.plugin.v1.ConfigureResponse)
+  rpc Process(stream laraplate.edge.plugin.v1.ProcessorIn) returns (stream laraplate.edge.plugin.v1.ProcessorOut)

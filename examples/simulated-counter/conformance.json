@@ -1,0 +1,52 @@
+{
+  "input": {
+    "valid": [
+      {
+        "id": "sim-valid-1",
+        "driver": "plugin:simulated-counter",
+        "connection": {},
+        "devices": [
+          {
+            "device": "press-1",
+            "points": [
+              {"signal": "strokes", "address": "counter:1", "read": {"poll": "1s"}, "type": "int32"},
+              {"signal": "parts", "address": "counter:5", "read": {"poll": "2s"}, "type": "int64", "priority": "critical"}
+            ]
+          },
+          {
+            "device": "press-2",
+            "points": [
+              {"signal": "strokes", "address": "counter:3", "read": {"poll": "500ms"}, "type": "int32"}
+            ]
+          }
+        ]
+      }
+    ],
+    "invalid": [
+      {
+        "id": "sim-invalid-address",
+        "driver": "plugin:simulated-counter",
+        "connection": {},
+        "devices": [
+          {"device": "press-1", "points": [{"signal": "strokes", "address": "counter:zero", "read": {"poll": "1s"}, "type": "int32"}]}
+        ]
+      },
+      {
+        "id": "sim-invalid-type",
+        "driver": "plugin:simulated-counter",
+        "connection": {},
+        "devices": [
+          {"device": "press-1", "points": [{"signal": "strokes", "address": "counter:1", "read": {"poll": "1s"}, "type": "float64"}]}
+        ]
+      },
+      {
+        "id": "sim-invalid-read",
+        "driver": "plugin:simulated-counter",
+        "connection": {},
+        "devices": [
+          {"device": "press-1", "points": [{"signal": "strokes", "address": "counter:1", "read": "subscribe", "type": "int32"}]}
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+# Build output
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# Coverage and profiling
+coverage.*
+*.prof
+
+# Environment and secrets
+.env
+.env.*
+
+# Editors and agents
+/.idea
+/.vscode
+/.zed
+/.cursor/
+/.codex
+/.worktrees/
+.DS_Store
+Thumbs.db
+.superpowers/

@@ -1,0 +1,44 @@
+// Copyright the laraedge-sdk authors. Licensed under the Apache License, Version 2.0.
+
+// The service every plugin serves, whatever kinds it offers. The standard
+// grpc.health.v1.Health service is served next to it and is not redefined here.
+syntax = "proto3";
+
+package laraplate.edge.plugin.v1;
+
+import "google/protobuf/duration.proto";
+
+option go_package = "github.com/getlaraplate/laraedge-sdk/pluginv1;pluginv1";
+
+// Identification and lifecycle of a plugin process.
+service Plugin {
+  // Info identifies the plugin. The host calls it right after the handshake,
+  // with a deadline of 5 seconds.
+  rpc Info(InfoRequest) returns (InfoResponse);
+  // Shutdown asks the plugin to stop within the deadline.
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+}
+
+// Request of Info.
+message InfoRequest {}
+
+// Response of Info.
+message InfoResponse {
+  // Name of the plugin, equal to the name in plugin.json.
+  string name = 1;
+  // Version of the plugin, equal to the version in plugin.json.
+  string version = 2;
+  // Protocol versions the plugin speaks, for example v1.
+  repeated string protocol_versions = 3;
+  // The canonical JSON of plugin.json; the host compares canonical forms.
+  bytes manifest = 4;
+}
+
+// Request of Shutdown.
+message ShutdownRequest {
+  // How long the plugin has to stop before the host kills it.
+  google.protobuf.Duration deadline = 1;
+}
+
+// Response of Shutdown.
+message ShutdownResponse {}

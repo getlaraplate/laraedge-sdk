@@ -1,0 +1,70 @@
+// Copyright the laraedge-sdk authors. Licensed under the Apache License, Version 2.0.
+
+// The service of a plugin that offers outputs: it delivers batches of records
+// to a destination.
+syntax = "proto3";
+
+package laraplate.edge.plugin.v1;
+
+import "google/protobuf/duration.proto";
+import "laraplate/edge/plugin/v1/common.proto";
+
+option go_package = "github.com/getlaraplate/laraedge-sdk/pluginv1;pluginv1";
+
+// Delivers batches. A plugin output never buffers: the agent does.
+service Output {
+  // Configure validates and applies the configuration of an instance; the
+  // deadline is 10 seconds.
+  rpc Configure(ConfigureRequest) returns (ConfigureResponse);
+  // Send delivers one batch and returns one outcome; the deadline is 30
+  // seconds, and a Send past it counts as OUTCOME_RETRY_AFTER.
+  rpc Send(SendRequest) returns (SendResult);
+}
+
+// How the destination handled a batch.
+enum Outcome {
+  // Never valid on the wire.
+  OUTCOME_UNSPECIFIED = 0;
+  // The batch was stored: the agent advances.
+  OUTCOME_ACCEPTED = 1;
+  // The batch was stored earlier: the agent advances.
+  OUTCOME_DUPLICATE = 2;
+  // Try again later: the agent backs off, honouring retry_after.
+  OUTCOME_RETRY_AFTER = 3;
+  // The batch is too large: the agent splits it in two.
+  OUTCOME_SPLIT = 4;
+  // The batch is invalid: the agent drops it and records a loss.
+  OUTCOME_REJECT_INVALID = 5;
+  // The credentials are refused: the agent suspends sending and keeps buffering.
+  OUTCOME_SUSPEND_AUTH = 6;
+}
+
+// A batch of records for one destination.
+message Batch {
+  // Identifier of the batch (UUIDv7), the key of idempotency.
+  string message_id = 1;
+  // Sequence number of the batch in the source buffer.
+  uint64 source_seq = 2;
+  // The records of the batch.
+  repeated Record records = 3;
+  // The samples dropped before this batch.
+  repeated LossMarker losses = 4;
+}
+
+// Request of Send.
+message SendRequest {
+  // Identifier of the instance.
+  string instance_id = 1;
+  // The batch to deliver.
+  Batch batch = 2;
+}
+
+// Response of Send.
+message SendResult {
+  // What happened to the batch.
+  Outcome outcome = 1;
+  // How long to wait before trying again; used with OUTCOME_RETRY_AFTER.
+  google.protobuf.Duration retry_after = 2;
+  // Why the batch was refused; used with OUTCOME_REJECT_INVALID.
+  string reason = 3;
+}

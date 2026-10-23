@@ -1,0 +1,47 @@
+// Copyright the laraedge-sdk authors. Licensed under the Apache License, Version 2.0.
+
+// The service of a plugin that offers processors: it derives new samples from
+// the records of observed devices.
+syntax = "proto3";
+
+package laraplate.edge.plugin.v1;
+
+import "laraplate/edge/plugin/v1/common.proto";
+
+option go_package = "github.com/getlaraplate/laraedge-sdk/pluginv1;pluginv1";
+
+// Derives samples. The agent sends copies of the records of the observed
+// devices; the plugin sends samples of its declared derived devices and signals
+// only, anything else is refused and counted.
+service Processor {
+  // Configure validates and applies the configuration of an instance; the
+  // deadline is 10 seconds.
+  rpc Configure(ConfigureRequest) returns (ConfigureResponse);
+  // Process is the bidirectional stream of an instance. The first message from
+  // the agent is always a ProcessStart. An instance has at most one stream:
+  // while one is open, a second Process of the same instance is refused with
+  // ALREADY_EXISTS.
+  rpc Process(stream ProcessorIn) returns (stream ProcessorOut);
+}
+
+// Opens the stream of an instance.
+message ProcessStart {
+  // Identifier of the instance.
+  string instance_id = 1;
+}
+
+// A message from the agent to the processor.
+message ProcessorIn {
+  oneof msg {
+    // First message of the stream.
+    ProcessStart start = 1;
+    // A copy of a record of an observed device.
+    Record record = 2;
+  }
+}
+
+// A message from the processor to the agent.
+message ProcessorOut {
+  // A sample of a derived device.
+  Sample sample = 1;
+}
