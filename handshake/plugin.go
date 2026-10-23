@@ -10,9 +10,13 @@
 //
 // The host side is [Launch]: it starts the plugin without a shell and with a minimal
 // environment, reads the handshake line, and returns a [Process] whose [Process.Dial] opens
-// the gRPC connection. The plugin's process tree is tied to the host: a parent-death signal
-// and its own process group on Linux, a job object that kills on close on Windows. Other Unix
-// systems give no parent-death guarantee and serve for development only.
+// the gRPC connection. The plugin is tied to the host: on Linux it leads its own process group
+// and gets a parent-death signal; on Windows it runs in a job object that kills on close.
+// [Process.Kill] and the plugin's own exit end its descendants as well. When the host dies
+// suddenly, Windows kills the whole job, while the Linux parent-death signal reaches the plugin
+// only: the children it started survive, and the agent's systemd unit (whose cgroup is killed
+// as a whole, KillMode=control-group) is the backstop. Other Unix systems give no parent-death
+// guarantee and serve for development only.
 package handshake
 
 import (

@@ -57,6 +57,9 @@ func (t *processTree) release() {
 	_ = windows.CloseHandle(t.job)
 }
 
+// startCommand starts cmd; only Linux needs a dedicated thread.
+func startCommand(cmd *exec.Cmd) error { return cmd.Start() }
+
 // awaitExit cannot wait without reaping here; Windows holds the process handle, so no pid is
 // reused while the job is open.
 func awaitExit(int) bool { return false }

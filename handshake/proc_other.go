@@ -31,5 +31,8 @@ func (*processTree) kill(pid int) error {
 
 func (*processTree) release() {}
 
+// startCommand starts cmd; only Linux needs a dedicated thread.
+func startCommand(cmd *exec.Cmd) error { return cmd.Start() }
+
 // awaitExit cannot wait without reaping here.
 func awaitExit(int) bool { return false }

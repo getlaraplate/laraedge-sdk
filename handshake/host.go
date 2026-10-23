@@ -46,6 +46,9 @@ var (
 	ErrBadHandshakeLine = errors.New("bad handshake line")
 	// ErrHandshakeTimeout reports a plugin that printed no handshake line within the timeout.
 	ErrHandshakeTimeout = errors.New("no handshake line within the timeout")
+	// ErrExited reports that the plugin exited while [Process.Dial] waited for the connection;
+	// the error also wraps the plugin's exit status when it is not a clean exit.
+	ErrExited = errors.New("the plugin exited")
 )
 
 // ExitError reports a plugin that exited before completing the handshake. It matches
@@ -249,7 +252,7 @@ func start(path, dir string, env []string) (*Process, error) {
 		_ = stderrWrite.Close()
 		return nil, fmt.Errorf("handshake: process tree: %w", err)
 	}
-	err = cmd.Start()
+	err = startCommand(cmd)
 	// The child holds its own copies; the host keeps only the read ends.
 	_ = stdoutWrite.Close()
 	_ = stderrWrite.Close()
@@ -329,8 +332,11 @@ func (p *Process) await() {
 	var err error
 	if awaitExit(p.Pid) {
 		// The exited process is not reaped yet, so its pid cannot be reused: reaping under the
-		// lock keeps Kill from signalling a reused process group.
+		// lock keeps Kill from signalling a reused process group. Meanwhile the zombie still
+		// reserves the group id, so the descendants the plugin left behind are killed safely,
+		// as closing the job does on Windows.
 		p.mu.Lock()
+		_ = p.tree.kill(p.Pid)
 		err = p.cmd.Wait()
 		p.reaped = true
 		p.tree.release()
@@ -347,7 +353,10 @@ func (p *Process) await() {
 	close(p.done)
 }
 
-// drainOutput waits for the output copiers, then closes the pipes.
+// drainOutput waits for the output copiers, closes the pipes, and waits for the copiers again
+// so that no write to the caller's writers follows Wait. A descendant holding the pipes open
+// only delays it: closing the read ends ends the copiers' reads. Each wait is bounded by
+// outputDrainTimeout, as a last resort where a close cannot end a blocked read.
 func (p *Process) drainOutput() {
 	drained := make(chan struct{})
 	go func() {
@@ -362,6 +371,11 @@ func (p *Process) drainOutput() {
 	}
 	_ = p.stdoutRead.Close()
 	_ = p.stderrRead.Close()
+	timer.Reset(outputDrainTimeout)
+	select {
+	case <-drained:
+	case <-timer.C:
+	}
 }
 
 // abort kills the plugin during a failed handshake and waits until it is reaped.
@@ -380,9 +394,22 @@ func (p *Process) exitError(tail *tailBuffer) error {
 }
 
 // Dial opens a gRPC connection to the plugin over its local transport, with message limits of
-// [MaxMessageSize], and returns once the connection is ready or ctx ends.
+// [MaxMessageSize], and returns once the connection is ready, ctx ends, or the plugin exits
+// ([ErrExited]).
 func (p *Process) Dial(ctx context.Context) (*grpc.ClientConn, error) {
 	address := p.Address
+	if err := p.exitedError(); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	go func() {
+		select {
+		case <-p.done:
+			cancel(ErrExited)
+		case <-ctx.Done():
+		}
+	}()
 	conn, err := grpc.NewClient("passthrough:///localhost",
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
@@ -404,9 +431,26 @@ func (p *Process) Dial(ctx context.Context) (*grpc.ClientConn, error) {
 		}
 		if !conn.WaitForStateChange(ctx, state) {
 			_ = conn.Close()
+			if err := p.exitedError(); err != nil {
+				return nil, err
+			}
 			return nil, fmt.Errorf("handshake: connecting to the plugin at %s (state %s): %w", address, state, ctx.Err())
 		}
 	}
+}
+
+// exitedError returns an error wrapping [ErrExited] and the exit status once the plugin has
+// exited, nil before.
+func (p *Process) exitedError() error {
+	select {
+	case <-p.done:
+	default:
+		return nil
+	}
+	if p.waitErr != nil {
+		return fmt.Errorf("handshake: %w before the connection was ready: %w", ErrExited, p.waitErr)
+	}
+	return fmt.Errorf("handshake: %w before the connection was ready", ErrExited)
 }
 
 // Signal sends sig to the plugin process. On Windows only [os.Kill] is supported. After the

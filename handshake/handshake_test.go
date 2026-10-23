@@ -476,6 +476,102 @@ func TestKillEndsThePluginAndItsChildren(t *testing.T) {
 	}
 }
 
+// callPlugin makes one health call and ignores its outcome: with HELPER_EXIT_ON_CALL it makes
+// the helper exit by itself.
+func callPlugin(t *testing.T, process *handshake.Process) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, err := process.Dial(ctx)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	_, _ = healthpb.NewHealthClient(conn).Check(ctx, &healthpb.HealthCheckRequest{})
+}
+
+func TestPluginExitingByItselfTakesItsChildrenAlong(t *testing.T) {
+	reader, writer := io.Pipe()
+	cfg := config(t, "HELPER_CHILD=1", "HELPER_EXIT_ON_CALL=1")
+	cfg.Stdout = writer
+	process := launch(t, cfg)
+	line := readLine(t, bufio.NewReader(reader), 10*time.Second)
+	_ = reader.Close()
+	childPid, err := strconv.Atoi(strings.TrimPrefix(line, "child="))
+	if err != nil {
+		t.Fatalf("helper printed %q, want child=<pid>", line)
+	}
+	childExited := watchExit(t, childPid)
+
+	callPlugin(t, process)
+	if err := process.Wait(); err != nil {
+		t.Errorf("Wait: %v, want the plugin's clean exit", err)
+	}
+	if !childExited(10 * time.Second) {
+		killLeftover(childPid)
+		t.Error("the child of a plugin that exited by itself survived it")
+	}
+}
+
+func TestDialReturnsWhenThePluginExits(t *testing.T) {
+	cases := []struct {
+		name       string
+		exitBefore bool
+	}{
+		{"exits while connecting", false},
+		{"exited before the call", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			process := launch(t, config(t, "HELPER_NO_SERVE=1"))
+			if tc.exitBefore {
+				_ = process.Kill()
+				_ = process.Wait()
+			}
+			type result struct {
+				err error
+			}
+			done := make(chan result, 1)
+			go func() {
+				// No deadline: only the plugin's exit can end this Dial.
+				conn, err := process.Dial(context.Background())
+				if conn != nil {
+					_ = conn.Close()
+				}
+				done <- result{err}
+			}()
+			if !tc.exitBefore {
+				_ = process.Kill()
+			}
+			select {
+			case got := <-done:
+				if !errors.Is(got.err, handshake.ErrExited) {
+					t.Errorf("Dial: %v, want ErrExited", got.err)
+				}
+				var exitErr *exec.ExitError
+				if !errors.As(got.err, &exitErr) {
+					t.Errorf("Dial: %v, want it to wrap the exit status", got.err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("Dial did not return after the plugin exited")
+			}
+		})
+	}
+}
+
+func TestWaitReturnsAfterTheLastOutputWrite(t *testing.T) {
+	// Deliberately not synchronised: under -race a copier write after Wait is reported.
+	var stdout bytes.Buffer
+	cfg := config(t, "HELPER_HOLD_OUTPUT=1", "HELPER_EXIT_ON_CALL=1")
+	cfg.Stdout = &stdout
+	process := launch(t, cfg)
+	callPlugin(t, process)
+	_ = process.Wait()
+	if !strings.HasPrefix(stdout.String(), "child=") {
+		t.Errorf("stdout starts with %.40q, want the helper's child line", stdout.String())
+	}
+}
+
 // TestPluginDiesWithItsHost kills an intermediate host process and expects its plugin to go
 // with it: parent-death signal on Linux, job object on Windows.
 func TestPluginDiesWithItsHost(t *testing.T) {

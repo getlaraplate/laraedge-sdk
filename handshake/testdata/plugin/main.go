@@ -10,11 +10,17 @@
 //	HELPER_AFTER_STDERR  a line printed on stderr after the handshake
 //	HELPER_ECHO_ENV=1    after the handshake print env=<KEY> on stdout for every variable
 //	HELPER_CHILD=1       after the handshake start a blocked child of this helper, print child=<pid>
+//	HELPER_HOLD_OUTPUT=1 after the handshake start a child outside the helper's process group
+//	                     (Unix) that shares its stdout and floods it, print child=<pid>
+//	HELPER_FLOOD=1       write lines on stdout until stdout breaks (the HELPER_HOLD_OUTPUT child)
+//	HELPER_NO_SERVE=1    after the handshake block without serving
+//	HELPER_EXIT_ON_CALL=1 exit 0 on the first gRPC call instead of answering it
 //
 // After the handshake the helper serves grpc.health.v1.Health (SERVING) until it is killed.
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -32,6 +38,9 @@ import (
 func main() {
 	if os.Getenv("HELPER_SLEEP") == "1" {
 		block()
+	}
+	if os.Getenv("HELPER_FLOOD") == "1" {
+		flood()
 	}
 	if os.Getenv("HELPER_CRASH") == "1" {
 		for i := 1; i <= 30; i++ {
@@ -76,8 +85,22 @@ func main() {
 	if os.Getenv("HELPER_CHILD") == "1" {
 		startChild()
 	}
+	if os.Getenv("HELPER_HOLD_OUTPUT") == "1" {
+		startOutputHolder()
+	}
+	if os.Getenv("HELPER_NO_SERVE") == "1" {
+		block()
+	}
 
-	server := grpc.NewServer()
+	var options []grpc.ServerOption
+	if os.Getenv("HELPER_EXIT_ON_CALL") == "1" {
+		options = append(options, grpc.UnaryInterceptor(
+			func(context.Context, any, *grpc.UnaryServerInfo, grpc.UnaryHandler) (any, error) {
+				os.Exit(0)
+				return nil, nil
+			}))
+	}
+	server := grpc.NewServer(options...)
 	healthpb.RegisterHealthServer(server, health.NewServer())
 	if err := server.Serve(listener); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -99,6 +122,34 @@ func startChild() {
 		os.Exit(1)
 	}
 	fmt.Printf("child=%d\n", child.Process.Pid)
+}
+
+// startOutputHolder starts this helper again as a flooding child that shares the helper's
+// stdout and, on Unix, leaves the helper's process group, and prints its pid.
+func startOutputHolder() {
+	self, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	child := exec.Command(self)
+	child.Env = append(os.Environ(), "HELPER_FLOOD=1")
+	child.Stdout = os.Stdout
+	detach(child)
+	if err := child.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Printf("child=%d\n", child.Process.Pid)
+}
+
+// flood writes stdout lines until a write fails.
+func flood() {
+	for {
+		if _, err := fmt.Println("flood"); err != nil {
+			os.Exit(0)
+		}
+	}
 }
 
 // block keeps the helper alive until it is killed.
