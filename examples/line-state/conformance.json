@@ -7,7 +7,14 @@
         "devices": [
           {"device": "line-1", "signals": [{"signal": "state", "type": "int", "priority": "critical"}]}
         ],
-        "config": {}
+        "config": {},
+        "records": [
+          {"device_event": {"kind": "birth", "device": "press-1", "signals": [{"signal": "state", "data_type": "number"}]}},
+          {"device_event": {"kind": "birth", "device": "press-2", "signals": [{"signal": "state", "data_type": "number"}]}},
+          {"sample": {"device": "press-1", "signal": "state", "value": {"int": 1}}},
+          {"sample": {"device": "press-2", "signal": "state", "value": {"int": 3}}},
+          {"sample": {"device": "press-1", "signal": "state", "value": {"int": 2}}}
+        ]
       }
     ],
     "invalid": [

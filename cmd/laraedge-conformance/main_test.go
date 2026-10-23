@@ -17,7 +17,8 @@ func TestUsage(t *testing.T) {
 		if code := run(context.Background(), args, &stdout, &stderr); code != 2 {
 			t.Errorf("args %q: exit code %d, want 2", args, code)
 		}
-		if !strings.Contains(stderr.String(), "usage: laraedge-conformance") {
+		if !strings.Contains(stderr.String(), "usage: laraedge-conformance") ||
+			!strings.Contains(stderr.String(), "<plugin dir>/<name of plugin.json>, plus .exe on Windows") {
 			t.Errorf("args %q: stderr %q lacks the usage", args, stderr.String())
 		}
 	}

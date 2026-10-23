@@ -25,6 +25,22 @@ test fails while the committed file and the binary disagree.
 
 A plugin started by hand, without the agent, refuses to serve and exits with an explanation.
 
+To run the conformance suite on an example, put the binary, named after the manifest, next to
+`plugin.json` and `conformance.json` in one directory and pass it to `laraedge-conformance`, for
+example in a temporary directory:
+
+```sh
+dir="$(mktemp -d)/line-state"
+mkdir "$dir"
+cp examples/line-state/plugin.json examples/line-state/conformance.json "$dir"
+go build -o "$dir/line-state" ./examples/line-state
+go run ./cmd/laraedge-conformance "$dir"
+```
+
+A valid processor fixture may carry a `records` list: the records the suite sends to `Process`
+instead of its synthetic ones (see the package documentation of `conformance` for their shape). The
+suite removes it before `Configure`.
+
 ## simulated-counter (Input)
 
 A simulated machine whose points are counters, so it runs anywhere. The address of a point is
@@ -41,7 +57,8 @@ each observed device and emits the `state` of the derived device whenever the ma
 the timestamp of the sample that changed it. It ignores samples whose value is not an integer,
 samples of bad quality, other signals, devices that are not observed and device events. It refuses a
 section without `observe`, one that does not declare exactly one derived device with a `state`
-signal, and any key in `config`.
+signal, and any key in `config`. Its valid fixture carries `records`: births and `state` samples of
+the observed presses, which the conformance suite sends to `Process`.
 
 ## jsonl (Output)
 

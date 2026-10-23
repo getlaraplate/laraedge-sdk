@@ -18,8 +18,12 @@
 //	BROKEN_FIXED_ADDRESS=1      the socket or pipe has a fixed name, so a restart reuses it
 //	BROKEN_SILENT=<kind>        the input stream or the processor (input, processor) emits
 //	                            nothing
+//	BROKEN_CONCURRENT_STREAMS=1 a second stream of an input instance is served, not refused
+//	BROKEN_SEND_ERROR=1         every Send fails with an error
+//	BROKEN_EXIT_BEFORE_SHUTDOWN=1 after answering DUPLICATE, exit 0 at the next call, unanswered
 //
-// A section is valid unless it has the top-level member "refuse": true.
+// A section is valid unless it has the top-level member "refuse": true. A section with a
+// "records" member is refused: the suite must strip it, the agent never sends it.
 package main
 
 import (
@@ -32,6 +36,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -72,7 +77,7 @@ func main() {
 	fmt.Printf("1|v1|%s|%s\n", network, address)
 
 	p := newPlugin()
-	p.server = grpc.NewServer()
+	p.server = grpc.NewServer(grpc.ChainUnaryInterceptor(p.exitWhenArmed))
 	pb.RegisterPluginServer(p.server, &pluginService{p: p})
 	pb.RegisterInputServer(p.server, &inputService{p: p})
 	pb.RegisterProcessorServer(p.server, &processorService{p: p})
@@ -101,6 +106,16 @@ type plugin struct {
 
 	shutdownOnce sync.Once
 	shutdown     chan struct{}
+
+	exitArmed atomic.Bool // BROKEN_EXIT_BEFORE_SHUTDOWN: exit at the next call
+}
+
+// exitWhenArmed exits the process, without answering, at the first call after it was armed.
+func (p *plugin) exitWhenArmed(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+	if p.exitArmed.Load() {
+		os.Exit(0)
+	}
+	return handler(ctx, req)
 }
 
 func newPlugin() *plugin {
@@ -118,13 +133,18 @@ func (p *plugin) configure(kind string, req *pb.ConfigureRequest) (*pb.Configure
 		return nil, status.Error(codes.InvalidArgument, "instance_id is required")
 	}
 	var section struct {
-		Refuse bool `json:"refuse"`
+		Refuse  bool            `json:"refuse"`
+		Records json.RawMessage `json:"records"`
 	}
 	if err := json.Unmarshal(req.GetConfig(), &section); err != nil {
 		section.Refuse = true
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if section.Records != nil {
+		delete(p.sections, kind+"/"+id)
+		return &pb.ConfigureResponse{Errors: []*pb.ConfigError{{Path: "records", Message: "the agent never sends records"}}}, nil
+	}
 	if section.Refuse && os.Getenv("BROKEN_ACCEPT_INVALID") != kind {
 		delete(p.sections, kind+"/"+id)
 		return &pb.ConfigureResponse{Errors: []*pb.ConfigError{{Path: "refuse", Message: "the section asks to be refused"}}}, nil
@@ -230,7 +250,7 @@ func (s *inputService) Subscribe(req *pb.SubscribeRequest, stream pb.Input_Subsc
 		return err
 	}
 	s.p.mu.Lock()
-	if s.p.active[id] {
+	if s.p.active[id] && !defect("BROKEN_CONCURRENT_STREAMS") {
 		s.p.mu.Unlock()
 		return status.Error(codes.AlreadyExists, "the instance already has a running stream")
 	}
@@ -343,12 +363,18 @@ func (s *outputService) Send(_ context.Context, req *pb.SendRequest) (*pb.SendRe
 	if _, err := s.p.section("output", id); err != nil {
 		return nil, err
 	}
+	if defect("BROKEN_SEND_ERROR") {
+		return nil, status.Error(codes.Unavailable, "the destination is down")
+	}
 	key := id + "/" + req.GetBatch().GetMessageId()
 	s.p.mu.Lock()
 	defer s.p.mu.Unlock()
 	if s.p.seen[key] {
 		if defect("BROKEN_DUPLICATE_ERROR") {
 			return nil, status.Error(codes.Internal, "message_id already stored")
+		}
+		if defect("BROKEN_EXIT_BEFORE_SHUTDOWN") {
+			s.p.exitArmed.Store(true)
 		}
 		return &pb.SendResult{Outcome: pb.Outcome_OUTCOME_DUPLICATE}, nil
 	}

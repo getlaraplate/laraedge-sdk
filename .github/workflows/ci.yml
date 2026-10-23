@@ -49,18 +49,23 @@ jobs:
       - name: Test
         run: go test -race ./...
       # The conformance command on the example plugins, as a plugin author runs it: each
-      # example directory holds plugin.json, conformance.json and the binary named after it.
-      # Every example runs; the step fails when one of them fails the suite.
+      # plugin directory, under the runner's temporary directory so that the tree stays clean,
+      # holds plugin.json, conformance.json and the binary named after the manifest. Every
+      # example runs; the step fails when one of them fails the suite.
       - name: Conformance of the examples
         shell: bash
         run: |
           ext=""
           if [ "$RUNNER_OS" = "Windows" ]; then ext=".exe"; fi
-          go build -o "bin/laraedge-conformance$ext" ./cmd/laraedge-conformance
+          root="${RUNNER_TEMP//\\//}/conformance"
+          mkdir -p "$root"
+          go build -o "$root/laraedge-conformance$ext" ./cmd/laraedge-conformance
           failed=0
           for example in simulated-counter line-state jsonl; do
-            go build -o "examples/$example/$example$ext" "./examples/$example"
-            "./bin/laraedge-conformance$ext" "examples/$example" || failed=1
+            mkdir "$root/$example"
+            cp "examples/$example/plugin.json" "examples/$example/conformance.json" "$root/$example/"
+            go build -o "$root/$example/$example$ext" "./examples/$example"
+            "$root/laraedge-conformance$ext" "$root/$example" || failed=1
           done
           exit "$failed"
       - name: govulncheck

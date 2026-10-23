@@ -1,6 +1,6 @@
 // Command laraedge-conformance runs the conformance suite of package conformance on a plugin
-// directory: the binary, named after its manifest (plus .exe on Windows), with plugin.json and
-// conformance.json next to it.
+// directory: plugin.json, conformance.json and the binary, which must be named after the
+// manifest: <dir>/<name of plugin.json>, plus .exe on Windows.
 //
 //	laraedge-conformance [-timeout 10s] [-v] <plugin dir>
 //
@@ -35,6 +35,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	verbose := flags.Bool("v", false, "copy the plugin's output to stderr")
 	flags.Usage = func() {
 		_, _ = fmt.Fprintln(stderr, "usage: laraedge-conformance [-timeout 10s] [-v] <plugin dir>")
+		_, _ = fmt.Fprintln(stderr, "\nThe plugin dir holds plugin.json, conformance.json and the binary, named after the")
+		_, _ = fmt.Fprintln(stderr, "manifest: <plugin dir>/<name of plugin.json>, plus .exe on Windows.")
+		_, _ = fmt.Fprintln(stderr)
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {

@@ -283,8 +283,15 @@ func describeConfigErrors(errs []*pb.ConfigError) string {
 	return strings.Join(parts, ", ")
 }
 
+// Results of firstEvent other than an event or the stream's error.
+var (
+	errNoEvent       = errors.New("no event")
+	errEndedNoEvents = errors.New("the stream ended without an error and without an event")
+)
+
 // firstEvent opens a stream of the instance and waits for its first event, at most wait. The
-// stream stays open until cancel is called.
+// stream stays open until cancel is called. Without an event the error is errNoEvent (wrapped),
+// errEndedNoEvents, or the stream's own error.
 func (s *suite) firstEvent(client pb.InputClient, instance string, wait time.Duration) (cancel context.CancelFunc, err error) {
 	ctx, cancel := context.WithCancel(s.ctx)
 	stream, err := client.Subscribe(ctx, &pb.SubscribeRequest{InstanceId: instance})
@@ -304,20 +311,21 @@ func (s *suite) firstEvent(client pb.InputClient, instance string, wait time.Dur
 		if err != nil {
 			cancel()
 			if errors.Is(err, io.EOF) {
-				return nil, errors.New("the stream ended without an event")
+				return nil, errEndedNoEvents
 			}
 			return nil, err
 		}
 		return cancel, nil
 	case <-timer.C:
 		cancel()
-		return nil, fmt.Errorf("no event within %v", wait)
+		return nil, fmt.Errorf("%w within %v", errNoEvent, wait)
 	}
 }
 
-// checkInputStream opens the stream of the instance, waits for an event and cancels it. The
-// stream has ended when a new stream of the instance is served: until then a plugin refuses a
-// second stream of the same instance (the SDK answers ALREADY_EXISTS).
+// checkInputStream opens the stream of the instance and waits for an event. While it is open, a
+// second stream of the instance must be refused (one stream per instance, ALREADY_EXISTS in the
+// protocol). Then the first stream is cancelled: it has ended once a new stream of the instance
+// is served, since until then the plugin refuses it.
 func (s *suite) checkInputStream(sess *session, instance string) {
 	const name = "input.stream"
 	client := pb.NewInputClient(sess.conn)
@@ -326,6 +334,21 @@ func (s *suite) checkInputStream(sess *session, instance string) {
 		s.fail(name, "the stream did not start: %v", err)
 		return
 	}
+	cancelSecond, err := s.firstEvent(client, instance, s.timeout)
+	switch {
+	case err == nil:
+		cancelSecond()
+		cancel()
+		s.fail(name, "a second stream of the instance was served while the first was open; the protocol allows one "+
+			"stream per instance and refuses another with ALREADY_EXISTS")
+		return
+	case errors.Is(err, errNoEvent) || errors.Is(err, errEndedNoEvents):
+		cancel()
+		s.fail(name, "a second stream of the instance, opened while the first was open, was not refused (%v); want "+
+			"ALREADY_EXISTS", err)
+		return
+	}
+	refusal := status.Code(err)
 	cancel()
 	cancelled := time.Now()
 
@@ -337,7 +360,8 @@ func (s *suite) checkInputStream(sess *session, instance string) {
 		cancelAgain, err := s.firstEvent(client, instance, max(time.Until(cancelled.Add(s.timeout)), time.Millisecond))
 		if err == nil {
 			cancelAgain()
-			s.pass(name, "started, and served again %v after its cancellation", time.Since(cancelled).Round(time.Millisecond))
+			s.pass(name, "started, a second stream refused with %s, served again %v after the cancellation", refusal,
+				time.Since(cancelled).Round(time.Millisecond))
 			return
 		}
 		select {
@@ -403,9 +427,9 @@ func (s *suite) checkInputProbe(sess *session, instance string) {
 	s.pass(name, "%d samples for %d points in %v", len(resp.GetSamples()), len(want), elapsed)
 }
 
-// checkProcessorSignals feeds the processor births and samples of its observed devices (for the
-// signal names the fixture declares, with changing integer values), ends its side of the stream
-// and collects the samples until the stream ends or the timeout passes.
+// checkProcessorSignals feeds the processor the records of the first valid fixture, or synthetic
+// records when it has none (see syntheticRecords), ends its side of the stream and collects the
+// samples until the stream ends or the timeout passes. The suite opens one Process stream only.
 func (s *suite) checkProcessorSignals(sess *session, instance string) {
 	const name = "processor.signals"
 	cfg, err := sdk.DecodeProcessor(s.fixtures.Processor.Valid[0])
@@ -426,6 +450,21 @@ func (s *suite) checkProcessorSignals(sess *session, instance string) {
 	if len(cfg.Observe) == 0 || len(declared) == 0 {
 		s.fail(name, "the first valid processor fixture observes no device or declares no signal")
 		return
+	}
+	base := time.Now().UTC()
+	records := syntheticRecords(base, cfg.Observe, signals)
+	source := "synthetic records (births, then integer samples 1, 2, 3 of the declared signal names on the observed devices)"
+	if s.processorRecords != nil {
+		records = make([]*pb.Record, 0, len(s.processorRecords))
+		for i, r := range s.processorRecords {
+			record, err := r.toProto(base, i)
+			if err != nil {
+				s.fail(name, "records[%d]: %v", i, err)
+				return
+			}
+			records = append(records, record)
+		}
+		source = "the records of conformance.json"
 	}
 
 	ctx, cancel := context.WithTimeout(s.ctx, s.timeout)
@@ -455,7 +494,7 @@ func (s *suite) checkProcessorSignals(sess *session, instance string) {
 		}
 	}()
 
-	sendErr := sendProbeRecords(stream, instance, cfg.Observe, signals)
+	sendErr := sendRecords(stream, instance, records)
 	r := <-collected
 	var problems []string
 	for _, sample := range r.samples {
@@ -466,6 +505,11 @@ func (s *suite) checkProcessorSignals(sess *session, instance string) {
 	}
 	slices.Sort(problems)
 	problems = slices.Compact(problems)
+	nothing := "so nothing could be checked"
+	if s.processorRecords == nil {
+		nothing += `; add a "records" list to the first valid processor fixture of conformance.json with records ` +
+			"the processor answers"
+	}
 	switch {
 	case len(problems) > 0:
 		s.fail(name, "the processor emitted undeclared signals: %s", strings.Join(problems, "; "))
@@ -476,51 +520,31 @@ func (s *suite) checkProcessorSignals(sess *session, instance string) {
 	case sendErr != nil:
 		s.fail(name, "sending the records: %v", sendErr)
 	case len(r.samples) == 0 && r.err == nil:
-		s.fail(name, "the stream ended without a sample for the records of the observed devices, so nothing could be checked")
+		s.fail(name, "the stream ended without a sample for %s, %s", source, nothing)
 	case len(r.samples) == 0:
-		s.fail(name, "no sample for the records of the observed devices within %v, so nothing could be checked", s.timeout)
+		s.fail(name, "no sample within %v for %s, %s", s.timeout, source, nothing)
 	default:
-		s.pass(name, "%d samples, all of declared signals", len(r.samples))
+		s.pass(name, "%d samples, all of declared signals, for %s", len(r.samples), source)
 	}
 }
 
-// sendProbeRecords starts the stream on the instance and sends a birth of every observed device,
-// then three rounds of samples of every signal name with values 1, 2 and 3, and ends its side.
-func sendProbeRecords(stream pb.Processor_ProcessClient, instance string, observe, signals []string) error {
+// sendRecords starts the stream on the instance, sends the records and ends its side.
+func sendRecords(stream pb.Processor_ProcessClient, instance string, records []*pb.Record) error {
 	err := stream.Send(&pb.ProcessorIn{Msg: &pb.ProcessorIn_Start{Start: &pb.ProcessStart{InstanceId: instance}}})
 	if err != nil {
 		return err
 	}
-	base := time.Now().UTC()
-	for _, device := range observe {
-		birth := &pb.DeviceEvent{Kind: pb.EventKind_EVENT_KIND_BIRTH, Device: device, Ts: timestamppb.New(base)}
-		for _, signal := range signals {
-			birth.Signals = append(birth.Signals, &pb.SignalInfo{Signal: signal, DataType: pb.DataType_DATA_TYPE_NUMBER})
-		}
-		record := &pb.Record{Item: &pb.Record_DeviceEvent{DeviceEvent: birth}}
+	for _, record := range records {
 		if err := stream.Send(&pb.ProcessorIn{Msg: &pb.ProcessorIn_Record{Record: record}}); err != nil {
 			return err
-		}
-	}
-	for value := int64(1); value <= 3; value++ {
-		for _, device := range observe {
-			for _, signal := range signals {
-				record := &pb.Record{Item: &pb.Record_Sample{Sample: &pb.Sample{
-					Device: device, Signal: signal, Ts: timestamppb.New(base.Add(time.Duration(value) * time.Millisecond)),
-					Value:   &pb.Value{Kind: &pb.Value_IntValue{IntValue: value}},
-					Quality: pb.Quality_QUALITY_GOOD, Priority: pb.Priority_PRIORITY_CRITICAL,
-				}}}
-				if err := stream.Send(&pb.ProcessorIn{Msg: &pb.ProcessorIn_Record{Record: record}}); err != nil {
-					return err
-				}
-			}
 		}
 	}
 	return stream.CloseSend()
 }
 
 // checkOutputSend sends one small valid batch twice under the same message_id: the first answer
-// is checked by output.send, both by output.duplicate.
+// is checked by output.send, both by output.duplicate, which is not run when the first Send
+// failed with an error.
 func (s *suite) checkOutputSend(sess *session, instance string) {
 	now := time.Now().UTC()
 	req := &pb.SendRequest{InstanceId: instance, Batch: &pb.Batch{
@@ -542,6 +566,8 @@ func (s *suite) checkOutputSend(sess *session, instance string) {
 	switch {
 	case firstErr != nil:
 		s.fail("output.send", "Send: %v", firstErr)
+		s.notRun("the first Send failed", "output.duplicate")
+		return
 	case first.GetOutcome() == pb.Outcome_OUTCOME_UNSPECIFIED || pb.Outcome_name[int32(first.GetOutcome())] == "":
 		s.fail("output.send", "Send answered the outcome %d, which is not one of the six", first.GetOutcome())
 	default:
@@ -584,15 +610,24 @@ func newMessageID(now time.Time) string {
 	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
 }
 
-// checkShutdown asks the plugin to stop within shutdownDeadline and waits for its exit. The plugin
-// may exit before its answer is flushed, so an UNAVAILABLE answer or an EOF counts as success.
+// checkShutdown asks the plugin to stop within shutdownDeadline and waits for its exit. A health
+// check right before proves the plugin was still running, so one that exited on its own does not
+// pass. The plugin may exit before its answer is flushed, so an UNAVAILABLE answer or an EOF
+// counts as success.
 func (s *suite) checkShutdown(sess *session) {
 	const name = "shutdown"
+	healthCtx, healthCancel := context.WithTimeout(s.ctx, healthDeadline)
+	_, err := healthpb.NewHealthClient(sess.conn).Check(healthCtx, &healthpb.HealthCheckRequest{})
+	healthCancel()
+	if err != nil {
+		s.fail(name, "before Shutdown the plugin did not answer a health check: %v", err)
+		return
+	}
 	started := time.Now()
 	ctx, cancel := context.WithTimeout(s.ctx, shutdownDeadline+exitGrace)
 	defer cancel()
-	_, err := pb.NewPluginClient(sess.conn).Shutdown(ctx, &pb.ShutdownRequest{Deadline: durationpb.New(shutdownDeadline)})
-	if err != nil && status.Code(err) != codes.Unavailable && !strings.Contains(err.Error(), "EOF") {
+	_, err = pb.NewPluginClient(sess.conn).Shutdown(ctx, &pb.ShutdownRequest{Deadline: durationpb.New(shutdownDeadline)})
+	if err != nil && status.Code(err) != codes.Unavailable && !errors.Is(err, io.EOF) {
 		s.fail(name, "Shutdown: %v", err)
 		return
 	}
@@ -620,7 +655,9 @@ func (s *suite) checkShutdown(sess *session) {
 }
 
 // checkRestart launches the plugin, connects, kills it as kill -9 does and launches it again with
-// the same socket directory.
+// the same socket directory. The killed plugin cannot remove its socket: the host removes the
+// leftover *.sock files of the directory before the new launch (S4), which works when the plugin
+// names its socket as S4 says.
 func (s *suite) checkRestart() {
 	const name = "restart"
 	socketDir, err := s.tempDir()
@@ -657,9 +694,12 @@ func (s *suite) checkRestart() {
 	}
 	if second.proc.Network == "unix" {
 		if _, err := os.Lstat(oldAddress); !errors.Is(err, fs.ErrNotExist) {
-			s.fail(name, "after the kill and a new launch the old socket %s is still there", oldAddress)
+			s.fail(name, "the old socket %s survived the relaunch: the host removes the leftover *.sock files of the "+
+				"socket directory (S4), so the plugin must name its socket p<8 hex>.sock", oldAddress)
 			return
 		}
+		s.pass(name, "new handshake on %s after the kill; the host removed the old socket", second.proc.Address)
+		return
 	}
 	s.pass(name, "new handshake on %s after the kill", second.proc.Address)
 }

@@ -4,9 +4,10 @@
 // The command laraedge-conformance runs it from the shell.
 //
 // The plugin directory holds plugin.json, conformance.json (fixtures, decision S8) and the
-// binary, named after the manifest's name (plus .exe on Windows). Every process the suite starts
-// runs with a minimal environment (PATH, TZ, SystemRoot on Windows), its working directory in a
-// fresh temporary directory and its socket directory in another, never in the plugin directory.
+// binary, which must be named after the manifest: <dir>/<name> with name the "name" of
+// plugin.json, plus .exe on Windows. Every process the suite starts runs with a minimal
+// environment (PATH, TZ, SystemRoot on Windows), its working directory in a fresh temporary
+// directory and its socket directory in another, never in the plugin directory.
 //
 // The checks, in report order, with their stable names:
 //
@@ -25,29 +26,53 @@
 //	input.configure      every valid input fixture is accepted, every invalid one refused with
 //	                     configuration errors
 //	input.stream         the stream of the first valid fixture delivers an event within the
-//	                     timeout and ends on cancellation: a new stream of the same instance is
-//	                     served within the timeout afterwards (a plugin refuses a second stream
-//	                     of an instance while the first runs, as the SDK does)
+//	                     timeout; while it is open a second stream of the same instance is
+//	                     refused (one stream per instance, ALREADY_EXISTS in the protocol); after
+//	                     its cancellation a new stream of the instance is served within the
+//	                     timeout, which proves the first one ended
 //	input.probe          Probe answers within its 30 s deadline with one sample per point
 //	processor.configure  as input.configure, for processor fixtures
-//	processor.signals    fed a birth of every observed device of the first valid fixture, then
-//	                     integer samples 1, 2, 3 of each signal name the fixture declares, the
+//	processor.signals    fed the records of the first valid fixture (see Records below), the
 //	                     processor emits at least one sample, and only of the devices and
 //	                     signals the fixture declares
 //	output.configure     as input.configure, for output fixtures
 //	output.send          a valid batch is answered with one of the six outcomes
 //	output.duplicate     the same message_id sent twice is answered ACCEPTED or DUPLICATE both
-//	                     times, never with an error
-//	shutdown             after Shutdown with a 5 s deadline the plugin exits 0 within it (plus
-//	                     1 s to be reaped); an UNAVAILABLE answer or EOF counts as an answer
+//	                     times; not run when the first Send failed with an error
+//	shutdown             the plugin still answers a health check, then after Shutdown with a
+//	                     5 s deadline it exits 0 within it (plus 1 s to be reaped); an
+//	                     UNAVAILABLE answer or EOF to Shutdown counts as an answer
 //	restart              after a kill -9, a new launch with the same socket directory performs
-//	                     a new handshake on a new address, and the old socket file is gone
+//	                     a new handshake on a new address; on Unix the old socket is gone,
+//	                     removed by the host as a leftover *.sock file (S4)
 //
 // The checks of a kind appear only when plugin.json offers that kind. A check that cannot run
 // because one it builds on failed (for instance every check that needs a connection when the
 // handshake failed) is reported failed with a Detail starting with "not run: ": a report never
 // passes a check it did not perform. For the same reason a check with nothing to judge fails: an
 // input stream without events, a processor that emits nothing for the records it is fed.
+//
+// The suite opens one Process stream per processor instance, so the one-stream rule is checked
+// on inputs only.
+//
+// # Records
+//
+// A valid processor fixture may carry a "records" member: the records processor.signals sends to
+// Process, in order. The suite removes the member before Configure, since the agent never sends
+// it, and uses the records of the first valid fixture only. Without it the suite sends synthetic
+// records: a birth of every observed device, then integer samples 1, 2 and 3 of every declared
+// signal name on every observed device; a processor that answers other records needs the list.
+// Each record holds exactly one of "sample" and "device_event", as an sdk.Record:
+//
+//	{"sample": {"device": "press-1", "signal": "state", "value": {"int": 3},
+//	            "quality": "good", "priority": "critical", "ts": "2026-10-23T10:00:00Z"}}
+//	{"device_event": {"kind": "birth", "device": "press-1",
+//	                  "signals": [{"signal": "state", "data_type": "number", "unit": ""}]}}
+//
+// A value holds exactly one of "int", "float", "bool" and "string". Quality is good (default),
+// uncertain or bad; priority critical (default) or bulk; kind birth or death; data_type number,
+// boolean or string. Without "ts" a record is stamped at the start of the check plus one
+// millisecond per position in the list. Unknown members are refused.
 package conformance
 
 import (
@@ -170,7 +195,9 @@ type suite struct {
 	manifest    manifest.Manifest
 	manifestRaw []byte
 	fixtures    fixtures
-	binary      string
+	// processorRecords are the records of the first valid processor fixture, nil when it has none.
+	processorRecords []fixtureRecord
+	binary           string
 
 	tempRoot string
 	tempSeq  int
@@ -248,7 +275,7 @@ func (s *suite) runChecks() {
 	s.checkHealth(sess)
 	for _, kind := range s.kinds() {
 		if !complete[kind] {
-			s.notRun("conformance.json lacks valid or invalid "+kind+" fixtures", kindChecks[kind]...)
+			s.notRun("conformance.json has no usable "+kind+" fixtures", kindChecks[kind]...)
 			continue
 		}
 		instance, configured := s.checkConfigure(sess, kind)
@@ -350,6 +377,12 @@ func (s *suite) checkFixtures() map[string]bool {
 				problems = append(problems, problem)
 				break
 			}
+			if kind == "processor" {
+				if problem := s.takeRecords(fx); problem != "" {
+					problems = append(problems, problem)
+					break
+				}
+			}
 			complete[kind] = true
 			counts = append(counts, fmt.Sprintf("%s: %d valid, %d invalid", kind, len(fx.Valid), len(fx.Invalid)))
 		}
@@ -360,6 +393,22 @@ func (s *suite) checkFixtures() map[string]bool {
 	}
 	s.pass("fixtures", "%s", strings.Join(counts, "; "))
 	return complete
+}
+
+// takeRecords removes the records member from the valid processor fixtures, keeps the records of
+// the first one for processor.signals and reports the first malformed list.
+func (s *suite) takeRecords(fx *kindFixtures) string {
+	for i, section := range fx.Valid {
+		stripped, records, err := splitRecords(section)
+		if err != nil {
+			return fmt.Sprintf("processor.valid[%d].%v", i, err)
+		}
+		fx.Valid[i] = stripped
+		if i == 0 {
+			s.processorRecords = records
+		}
+	}
+	return ""
 }
 
 // sectionsAreObjects reports the first fixture of kind that is not a JSON object.

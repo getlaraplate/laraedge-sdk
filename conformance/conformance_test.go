@@ -187,6 +187,20 @@ func assertReport(t *testing.T, report conformance.Report, want []string, failin
 	}
 }
 
+// assertDetail requires the detail of the named check to contain want.
+func assertDetail(t *testing.T, report conformance.Report, name, want string) {
+	t.Helper()
+	for _, c := range report.Checks {
+		if c.Name == name {
+			if !strings.Contains(c.Detail, want) {
+				t.Errorf("check %s detail %q lacks %q", name, c.Detail, want)
+			}
+			return
+		}
+	}
+	t.Errorf("no check %s", name)
+}
+
 func TestExamplesPassEveryCheck(t *testing.T) {
 	tests := []struct {
 		plugin                   string
@@ -201,6 +215,10 @@ func TestExamplesPassEveryCheck(t *testing.T) {
 			t.Parallel()
 			report := runSuite(t, pluginDirs[tt.plugin], 0)
 			assertReport(t, report, checkNames(tt.input, tt.processor, tt.output), "")
+			if tt.processor {
+				// line-state's fixture carries records: the suite sends them, not its own.
+				assertDetail(t, report, "processor.signals", "for the records of conformance.json")
+			}
 		})
 	}
 }
@@ -219,6 +237,8 @@ func TestEachDefectFailsItsCheck(t *testing.T) {
 		env     string
 		failing string
 		skipped []string
+		// detail, when set, must be part of the failing check's detail.
+		detail string
 	}{
 		{name: "started by hand without the cookie does not exit", env: "BROKEN_IGNORE_COOKIE=1", failing: "no-cookie"},
 		{
@@ -228,21 +248,44 @@ func TestEachDefectFailsItsCheck(t *testing.T) {
 		{name: "wrong permissions", env: "BROKEN_PERMISSIONS=1", failing: "permissions"},
 		{name: "Info differs from plugin.json", env: "BROKEN_INFO=1", failing: "info"},
 		{name: "health not SERVING", env: "BROKEN_HEALTH=1", failing: "health"},
-		{name: "invalid fixture accepted", env: "BROKEN_ACCEPT_INVALID=output", failing: "output.configure"},
-		{name: "input stream does not end on cancel", env: "BROKEN_STUCK_STREAM=1", failing: "input.stream"},
+		{name: "invalid input fixture accepted", env: "BROKEN_ACCEPT_INVALID=input", failing: "input.configure"},
+		{name: "invalid processor fixture accepted", env: "BROKEN_ACCEPT_INVALID=processor", failing: "processor.configure"},
+		{name: "invalid output fixture accepted", env: "BROKEN_ACCEPT_INVALID=output", failing: "output.configure"},
+		{
+			name: "input stream does not end on cancel", env: "BROKEN_STUCK_STREAM=1", failing: "input.stream",
+			detail: "did not end on cancellation",
+		},
+		{
+			name: "second concurrent input stream served", env: "BROKEN_CONCURRENT_STREAMS=1", failing: "input.stream",
+			detail: "second stream of the instance was served",
+		},
 		{name: "processor emits an undeclared signal", env: "BROKEN_UNDECLARED_SIGNAL=1", failing: "processor.signals"},
 		{name: "same message_id twice gives an error", env: "BROKEN_DUPLICATE_ERROR=1", failing: "output.duplicate"},
-		{name: "Shutdown past its deadline", env: "BROKEN_SLOW_SHUTDOWN=1", failing: "shutdown"},
+		{
+			name: "Send fails with an error", env: "BROKEN_SEND_ERROR=1", failing: "output.send",
+			skipped: []string{"output.duplicate"},
+		},
+		{name: "Shutdown past its deadline", env: "BROKEN_SLOW_SHUTDOWN=1", failing: "shutdown", detail: "still running"},
+		{
+			name: "plugin gone before Shutdown", env: "BROKEN_EXIT_BEFORE_SHUTDOWN=1", failing: "shutdown",
+			detail: "did not answer a health check",
+		},
 		{name: "no new socket after a kill -9 restart", env: "BROKEN_FIXED_ADDRESS=1", failing: "restart"},
 		// A check with nothing to judge fails instead of passing vacuously.
 		{name: "input stream without events", env: "BROKEN_SILENT=input", failing: "input.stream"},
-		{name: "processor without output", env: "BROKEN_SILENT=processor", failing: "processor.signals"},
+		{
+			name: "processor without output", env: "BROKEN_SILENT=processor", failing: "processor.signals",
+			detail: `add a "records" list`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			report := runSuite(t, pluginDirs["broken"], 3*time.Second, tt.env)
 			assertReport(t, report, checkNames(true, true, true), tt.failing, tt.skipped...)
+			if tt.detail != "" {
+				assertDetail(t, report, tt.failing, tt.detail)
+			}
 		})
 	}
 }
@@ -352,6 +395,86 @@ func TestMalformedFixtures(t *testing.T) {
 			report := runSuite(t, dir, 3*time.Second)
 			plugin := tt.plugin == "broken"
 			assertReport(t, report, checkNames(plugin, plugin, true), "fixtures", tt.skipped...)
+		})
+	}
+}
+
+// pluginCopy copies the binary and plugin.json of a built plugin into a new directory and writes
+// the given conformance.json.
+func pluginCopy(t *testing.T, plugin, fixtures string) string {
+	t.Helper()
+	dir := t.TempDir()
+	source := pluginDirs[plugin]
+	for _, file := range []string{binaryName(plugin), "plugin.json"} {
+		if err := copyFile(filepath.Join(source, file), filepath.Join(dir, file)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "conformance.json"), []byte(fixtures), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// brokenFixtures is conformance.json of the broken plugin with the given records member in its
+// valid processor fixture (empty: none).
+func brokenFixtures(records string) string {
+	processor := `{"id": "p", "observe": ["machine-1"], "devices": [{"device": "line-1", "signals": [{"signal": "state"}]}], "config": {}`
+	if records != "" {
+		processor += `, "records": ` + records
+	}
+	processor += "}"
+	return `{
+		"input": {"valid": [{"id": "i", "connection": {}, "devices": [{"device": "machine-1", "points": [{"signal": "count", "address": "a", "read": {"poll": "1s"}, "type": "int64"}]}]}], "invalid": [{"refuse": true}]},
+		"processor": {"valid": [` + processor + `], "invalid": [{"refuse": true}]},
+		"output": {"valid": [{"id": "o", "config": {}}], "invalid": [{"refuse": true}]}
+	}`
+}
+
+// TestProcessorRecordsFromTheFixture: the records of the first valid processor fixture are sent
+// instead of the synthetic ones, and stripped from the section sent to Configure (the broken
+// plugin refuses a section with records).
+func TestProcessorRecordsFromTheFixture(t *testing.T) {
+	tests := []struct {
+		name    string
+		records string
+		failing string
+		skipped []string
+		detail  string
+	}{
+		{
+			name:    "records the processor answers",
+			records: `[{"device_event": {"kind": "birth", "device": "machine-1", "signals": [{"signal": "count", "data_type": "number"}]}}, {"sample": {"device": "machine-1", "signal": "count", "value": {"int": 7}}}]`,
+			detail:  "for the records of conformance.json",
+		},
+		{
+			name:    "records the processor ignores",
+			records: `[{"sample": {"device": "elsewhere", "signal": "count", "value": {"float": 1.5}, "quality": "uncertain", "priority": "bulk", "ts": "2026-10-23T10:00:00Z"}}]`,
+			failing: "processor.signals",
+			detail:  "for the records of conformance.json, so nothing could be checked",
+		},
+		{
+			name:    "malformed records",
+			records: `[{"sample": {"device": "machine-1", "signal": "count", "value": {"int": 1, "bool": true}}}]`,
+			failing: "fixtures", skipped: processorChecks,
+			detail: "processor.valid[0].records[0]: sample.value: must hold exactly one of int, float, bool and string",
+		},
+		{
+			name:    "unknown member in a record",
+			records: `[{"sample": {"device": "machine-1", "signal": "count", "value": {"int": 1}, "colour": "red"}}]`,
+			failing: "fixtures", skipped: processorChecks, detail: "unknown field",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			report := runSuite(t, pluginCopy(t, "broken", brokenFixtures(tt.records)), 3*time.Second)
+			assertReport(t, report, checkNames(true, true, true), tt.failing, tt.skipped...)
+			name := tt.failing
+			if name == "" {
+				name = "processor.signals"
+			}
+			assertDetail(t, report, name, tt.detail)
 		})
 	}
 }
