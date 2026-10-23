@@ -1,0 +1,37 @@
+{
+  "input": {
+    "valid": [
+      {
+        "id": "broken-input-valid",
+        "connection": {},
+        "devices": [
+          {"device": "machine-1", "points": [{"signal": "count", "address": "a", "read": {"poll": "1s"}, "type": "int64"}]}
+        ]
+      }
+    ],
+    "invalid": [
+      {"id": "broken-input-invalid", "refuse": true, "connection": {}, "devices": []}
+    ]
+  },
+  "processor": {
+    "valid": [
+      {
+        "id": "broken-processor-valid",
+        "observe": ["machine-1"],
+        "devices": [{"device": "line-1", "signals": [{"signal": "state", "type": "int", "priority": "critical"}]}],
+        "config": {}
+      }
+    ],
+    "invalid": [
+      {"id": "broken-processor-invalid", "refuse": true, "observe": ["machine-1"], "devices": [], "config": {}}
+    ]
+  },
+  "output": {
+    "valid": [
+      {"id": "broken-output-valid", "config": {}}
+    ],
+    "invalid": [
+      {"id": "broken-output-invalid", "refuse": true, "config": {}}
+    ]
+  }
+}
