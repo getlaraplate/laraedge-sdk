@@ -567,8 +567,10 @@ func TestWaitReturnsAfterTheLastOutputWrite(t *testing.T) {
 	process := launch(t, cfg)
 	callPlugin(t, process)
 	_ = process.Wait()
-	if !strings.HasPrefix(stdout.String(), "child=") {
-		t.Errorf("stdout starts with %.40q, want the helper's child line", stdout.String())
+	// The flooding child may write before the helper prints its line, so the line is looked for
+	// anywhere in the output.
+	if !strings.Contains(stdout.String(), "child=") {
+		t.Errorf("stdout %.40q... lacks the helper's child line", stdout.String())
 	}
 }
 
