@@ -408,12 +408,17 @@ func (i *instance) configure(ctx, serving context.Context, call func() []ConfigE
 
 // acquire starts the stream of a configured instance; one stream at a time per instance. Once
 // serving is done (Shutdown has begun) it refuses with UNAVAILABLE: the check is made under i.mu,
-// as is the Stop pass's decision, so no stream starts on an instance that pass stopped.
+// as is the Stop pass's decision, so no stream starts on an instance that pass stopped. A stream
+// whose client has already left (parent done) is refused with its context error, so it neither
+// holds the instance against the client's next stream nor causes a Run and a Stop for nobody.
 func (i *instance) acquire(parent, serving context.Context) (context.Context, *activeRun, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if serving.Err() != nil {
 		return nil, nil, errShuttingDown
+	}
+	if err := parent.Err(); err != nil {
+		return nil, nil, status.FromContextError(err).Err()
 	}
 	if !i.configured {
 		return nil, nil, status.Error(codes.FailedPrecondition, "the instance is not configured")

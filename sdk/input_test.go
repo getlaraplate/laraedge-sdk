@@ -476,3 +476,24 @@ func TestInputProbeRefusesAValueWithoutKind(t *testing.T) {
 	_, err := c.Probe(testCtx(t), &pb.ProbeRequest{InstanceId: "a"})
 	wantCode(t, err, codes.Internal)
 }
+
+// TestAcquireRefusesAStreamWhoseClientLeft: a Subscribe whose client has already gone (its
+// context is done when the handler runs, e.g. the agent closed the stream and configured the
+// instance again before the handler got scheduled) must not take the instance, or the stream
+// the agent opens next is refused with ALREADY_EXISTS and Stop runs for a Run nobody wanted.
+func TestAcquireRefusesAStreamWhoseClientLeft(t *testing.T) {
+	inst := newInstance()
+	inst.configured = true
+	parent, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, run, err := inst.acquire(parent, context.Background())
+
+	wantCode(t, err, codes.Canceled)
+	if run != nil || inst.active != nil {
+		t.Fatal("the instance was taken by a stream whose client had left")
+	}
+	if inst.takeStop() == false {
+		t.Error("the instance was marked stopped although no Run began")
+	}
+}

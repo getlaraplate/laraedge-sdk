@@ -213,7 +213,9 @@ plugin output never buffers; the agent does.
 
 An input instance has at most one `Subscribe` stream, and a processor instance at most one `Process` stream. While one
 is open, a second one for the same instance is refused with the gRPC status `ALREADY_EXISTS`. A plugin that wants
-parallel streams needs separate instances. The conformance check `input.stream` verifies the rule for inputs and
+parallel streams needs separate instances. A stream whose client has already cancelled it when the plugin starts
+serving it is refused with that cancellation (`CANCELLED` or `DEADLINE_EXCEEDED`) and never holds the instance, so
+a host that closes a stream and opens a new one is not refused by its own old stream. The conformance check `input.stream` verifies the rule for inputs and
 that a new stream is served once the first was cancelled, which proves that the first one ended; the `Process` rule
 is written in `processor.proto` and is not probed by the suite.
 
