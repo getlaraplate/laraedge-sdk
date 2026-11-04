@@ -51,7 +51,7 @@ type fileState struct {
 	seen map[string]bool
 	// identity is the file the last append wrote, and size the size it left it at: after a
 	// durable append, or the clean point an append that has not been fsynced started from; nil
-	// until the first append.
+	// while no append has touched the file since it was first read or read again by refresh.
 	identity os.FileInfo
 	size     int64
 	// dirSynced is set once the parent directory has been fsynced after the file was opened.
@@ -248,11 +248,12 @@ func (s *sink) Send(ctx context.Context, instance string, b sdk.Batch) sdk.Outco
 	return sdk.Outcome{Kind: sdk.OutcomeAccepted}
 }
 
-// refresh forgets what the sink knows of the file of t when the file is no longer the one it last
-// wrote or was about to write: removed, replaced (for example rotated away and created again) or shorter than the sink
-// left it. Its message ids are then read again, and a truncation owed to the old file is dropped,
-// so it never extends the new one. The caller holds the lock of the file's state. A file
-// replaced between this check and the append is not noticed until the next send.
+// refresh forgets what the sink knows of the file of t when the file is no longer the one it
+// last wrote or was about to write: removed, replaced (for example rotated away and created
+// again) or shorter than the sink left it. Its message ids are then read again, and a truncation
+// owed to the old file is dropped, so it never extends the new one. The caller holds the lock of
+// the file's state. A file replaced between this check and the append is not noticed until the
+// next send.
 func (s *sink) refresh(t *target) error {
 	state := t.file
 	if state.identity == nil {
