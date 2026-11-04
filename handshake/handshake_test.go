@@ -436,6 +436,18 @@ func TestLaunchPassesOnlyTheGivenEnvironment(t *testing.T) {
 	}
 }
 
+// parseChildLine returns the pid of a child=<pid> line. The marker is looked for anywhere in
+// the line, not only at its start.
+func parseChildLine(t *testing.T, line string) int {
+	t.Helper()
+	_, pidText, found := strings.Cut(line, "child=")
+	pid, err := strconv.Atoi(pidText)
+	if !found || err != nil {
+		t.Fatalf("helper printed %q, want child=<pid>", line)
+	}
+	return pid
+}
+
 func TestKillEndsThePluginAndItsChildren(t *testing.T) {
 	reader, writer := io.Pipe()
 	cfg := config(t, "HELPER_CHILD=1")
@@ -443,10 +455,7 @@ func TestKillEndsThePluginAndItsChildren(t *testing.T) {
 	process := launch(t, cfg)
 	line := readLine(t, bufio.NewReader(reader), 10*time.Second)
 	_ = reader.Close()
-	childPid, err := strconv.Atoi(strings.TrimPrefix(line, "child="))
-	if err != nil {
-		t.Fatalf("helper printed %q, want child=<pid>", line)
-	}
+	childPid := parseChildLine(t, line)
 	pluginExited := watchExit(t, process.Pid)
 	childExited := watchExit(t, childPid)
 
@@ -497,10 +506,7 @@ func TestPluginExitingByItselfTakesItsChildrenAlong(t *testing.T) {
 	process := launch(t, cfg)
 	line := readLine(t, bufio.NewReader(reader), 10*time.Second)
 	_ = reader.Close()
-	childPid, err := strconv.Atoi(strings.TrimPrefix(line, "child="))
-	if err != nil {
-		t.Fatalf("helper printed %q, want child=<pid>", line)
-	}
+	childPid := parseChildLine(t, line)
 	childExited := watchExit(t, childPid)
 
 	callPlugin(t, process)
@@ -559,6 +565,9 @@ func TestDialReturnsWhenThePluginExits(t *testing.T) {
 	}
 }
 
+// TestWaitReturnsAfterTheLastOutputWrite takes about 2 s: the flooding child keeps stdout open,
+// so Wait ends the copiers only after outputDrainTimeout, a constant of the host and no
+// parameter a test could shorten.
 func TestWaitReturnsAfterTheLastOutputWrite(t *testing.T) {
 	// Deliberately not synchronised: under -race a copier write after Wait is reported.
 	var stdout bytes.Buffer
@@ -571,6 +580,68 @@ func TestWaitReturnsAfterTheLastOutputWrite(t *testing.T) {
 	// anywhere in the output.
 	if !strings.Contains(stdout.String(), "child=") {
 		t.Errorf("stdout %.40q... lacks the helper's child line", stdout.String())
+	}
+}
+
+// gatedWriter holds every write until open is closed, then records it: output the host has
+// read from the plugin but not yet delivered.
+type gatedWriter struct {
+	open     chan struct{}
+	openOnce sync.Once
+	buf      syncBuffer
+}
+
+func (w *gatedWriter) Write(p []byte) (int, error) {
+	<-w.open
+	return w.buf.Write(p)
+}
+
+func (w *gatedWriter) release() { w.openOnce.Do(func() { close(w.open) }) }
+
+// TestWaitDeliversOutputAWriterHeldBack keeps the caller's writer blocked until the host has
+// reaped the plugin: Wait must not return before every line reached the writer.
+func TestWaitDeliversOutputAWriterHeldBack(t *testing.T) {
+	const count = 200
+	writer := &gatedWriter{open: make(chan struct{})}
+	cfg := config(t, "HELPER_LINES="+strconv.Itoa(count), "HELPER_EXIT_ON_CALL=1")
+	cfg.Stdout = writer
+	process := launch(t, cfg)
+	t.Cleanup(writer.release)
+	pluginExited := watchExit(t, process.Pid)
+
+	callPlugin(t, process)
+	if !pluginExited(10 * time.Second) {
+		t.Fatal("the plugin did not exit on the call")
+	}
+	// Kill answers os.ErrProcessDone once the host has reaped the plugin.
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.Now().Add(10 * time.Second)
+	for !errors.Is(process.Kill(), os.ErrProcessDone) {
+		if time.Now().After(deadline) {
+			t.Fatal("the host did not reap the plugin")
+		}
+		<-ticker.C
+	}
+	// Dial reports ErrExited at once when Wait would return; a cancelled context ends it otherwise.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if conn, err := process.Dial(ctx); errors.Is(err, handshake.ErrExited) {
+		t.Error("Wait would return while output was still held by the writer")
+	} else if conn != nil {
+		_ = conn.Close()
+	}
+
+	writer.release()
+	if err := process.Wait(); err != nil {
+		t.Errorf("Wait: %v, want the plugin's clean exit", err)
+	}
+	var want strings.Builder
+	for i := 1; i <= count; i++ {
+		fmt.Fprintf(&want, "line=%d\n", i)
+	}
+	if got := writer.buf.String(); got != want.String() {
+		t.Errorf("stdout has %d of %d lines when Wait returned", strings.Count(got, "\n"), count)
 	}
 }
 

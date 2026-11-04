@@ -87,23 +87,24 @@ Outside this plan, by name:
 - Modify: `handshake/proc_windows.go`
 - Test: `handshake/proc_windows_test.go` (create if absent), the handshake tests S2 names
 
-- [ ] **Step 1: Write the failing test** (Windows build tag): a child that starts a grandchild as its first action
+- [x] **Step 1: Write the failing test** (Windows build tag): a child that starts a grandchild as its first action
   (a test helper binary, the shape the existing process-tree tests use); after `Kill`, the grandchild is gone
   (Review Focus 1). On Linux the test file does not build.
 
-- [ ] **Step 2: Implement S1.** Start the child with `CREATE_SUSPENDED`, assign it to the job, then resume its main
+- [x] **Step 2: Implement S1.** Start the child with `CREATE_SUSPENDED`, assign it to the job, then resume its main
   thread; on any failure between start and resume, terminate the child and return the error. Use `golang.org/x/sys/windows`
   (already a dependency).
 
-- [ ] **Step 3: S2.** Verify each sub-item; fix the output-join test so it fails when lines are lost (a deterministic
+- [x] **Step 3: S2.** Verify each sub-item; fix the output-join test so it fails when lines are lost (a deterministic
   slow writer), make the `child=` check a `Contains`, and shorten the drain test with a smaller bound if the bound is
   a parameter; the ownership refusal stays untested on CI (needs root): record that in the test file as a comment
   naming the manual check.
 
 - [ ] **Step 4: Verify**: `go test ./handshake -race -count=1` on Linux; `GOOS=windows go vet ./handshake`; the
-  Windows CI job green on the pull request.
+  Windows CI job green on the pull request. (Linux run and Windows vet and test compile done; the Windows CI job
+  is pending on the pull request.)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add handshake

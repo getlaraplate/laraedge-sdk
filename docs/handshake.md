@@ -395,7 +395,7 @@ platform files):
 | Platform | Mechanism | Plugin's descendants |
 |---|---|---|
 | Linux | The plugin leads its own process group and gets `SIGKILL` when the host dies (parent-death signal). | `Kill` and the plugin's own exit end the whole group while the host lives. When the host dies suddenly only the plugin is killed: the processes it started survive, and the agent's systemd unit (`KillMode=control-group`) is the backstop. A descendant that leaves the group (`setsid`, `setpgid`) is not reached by the group kill. |
-| Windows | The plugin runs in a job object that kills on close. | When the host dies or the plugin has been reaped the whole job is killed. The plugin joins the job right after it starts: a child started before that moment stays outside it. |
+| Windows | The plugin runs in a job object that kills on close. | When the host dies or the plugin has been reaped the whole job is killed. The plugin starts suspended and runs only once it is in the job, so every child it starts is in the job too. |
 | Other Unix | The plugin leads its own process group. | No parent-death guarantee: a plugin can outlive a host that dies. Development only. |
 
 For an author this means: do not daemonize or detach, keep child processes inside the plugin's process group, and
