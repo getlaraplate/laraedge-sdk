@@ -598,6 +598,38 @@ func TestAFileReplacedBehindTheSinkIsReadAgain(t *testing.T) {
 			t.Errorf("file holds %q, want x then m2", got)
 		}
 	})
+	t.Run("rewritten smaller after a failed first sync", func(t *testing.T) {
+		// No append of this sink was durable yet: the file it found is still the one it knows.
+		path := filepath.Join(t.TempDir(), "out.jsonl")
+		if err := os.WriteFile(path, []byte(`{"message_id":"m0"}`+"\n"+`{"message_id":"m1"}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s := configuredSink(t, path)
+		disk := &faultyDisk{failSyncs: 1}
+		s.open = disk.open
+		if o := send(s, batch("m2", 3, sampleRecord("d", 3))); o.Kind != sdk.OutcomeRetryAfter {
+			t.Fatalf("send with a failing Sync = %+v, want RETRY_AFTER", o)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(`{"message_id":"x"}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if o := send(s, batch("m2", 3, sampleRecord("d", 3))); o.Kind != sdk.OutcomeAccepted {
+			t.Fatalf("resend = %+v, want ACCEPTED", o)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.ContainsRune(string(raw), 0) {
+			t.Errorf("the file was extended with NUL bytes: %q", raw)
+		}
+		if got := messageIDs(t, path); !slices.Equal(got, []string{"x", "m2"}) {
+			t.Errorf("file holds %q, want x then m2", got)
+		}
+	})
 }
 
 // TestReadingAFileDoesNotHoldTheSink: while the message ids of one file are read at its first
