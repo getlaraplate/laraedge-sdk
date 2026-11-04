@@ -79,10 +79,11 @@ The Go SDK uses exit code 2 when the command line cannot be parsed and exit code
 - The plugin listens on a named pipe `\\.\pipe\laraedge-<pid>-<8 random lowercase hex digits>`, where `<pid>` is the
   plugin's process id. No socket directory is involved.
 - The pipe has a protected DACL with exactly one entry that allows full access to the user of the plugin process: the
-  security descriptor `D:P(A;;GA;;;<SID of the current user>)`. The Go SDK creates it with go-winio. The pipe is a byte-mode pipe that the plugin reads and writes (duplex)
-  and that rejects remote clients (`FILE_PIPE_REJECT_REMOTE_CLIENTS`), which is how go-winio creates it. The conformance
-  check `permissions` reads the descriptor and fails when the DACL is not protected, has more than one entry, is not an
-  allow entry, names another SID or does not grant full access.
+  security descriptor `D:P(A;;GA;;;<SID of the current user>)`. The Go SDK creates it with go-winio. The pipe is a
+  byte-mode pipe that the plugin reads and writes (duplex) and that rejects remote clients
+  (`FILE_PIPE_REJECT_REMOTE_CLIENTS`), which is how go-winio creates it. The conformance check `permissions` reads the
+  descriptor and fails when the DACL is not protected, has more than one entry, is not an allow entry, names another SID
+  or does not grant full access.
 
 ## The handshake line
 
@@ -140,6 +141,13 @@ the configuration there: configuration errors name a path and never a value.
 All services are on the one connection. `Plugin` and `grpc.health.v1.Health` are served by every plugin; `Input`,
 `Processor` and `Output` only by a plugin that offers that kind in its `plugin.json`.
 
+Two shapes of the protocol look like duplication and are deliberate. `ConfigureRequest` and `ConfigureResponse` are one
+pair of messages shared by the three kinds: the request is an instance identifier and the JSON of its section, the
+response the list of refusals, and the kind is the service the call is made on. The message `Health` of `input.proto`
+(`laraplate.edge.plugin.v1.Health`, the connection state inside an `InputEvent`) is not the `grpc.health.v1.Health`
+service: the packages differ and the two never meet on the wire. Both belong to `laraplate.edge.plugin.v1`, and renaming
+or splitting them would break plugins already built, so they stay.
+
 | Service | RPC | Deadline | Notes |
 |---|---|---|---|
 | `Plugin` | `Info` | 5 s | Identity and manifest. |
@@ -182,7 +190,8 @@ running `Subscribe` or `Process` stream and waits for it to end before calling t
 - Output: `id` and `config` (free object).
 
 A non-empty `ConfigureResponse.errors` means the configuration is refused; each entry is a `path` such as
-`devices[0].points[1].address` (a key that is empty or contains `.`, `[`, `]`, a quote or whitespace, such as `a.b`, is written as `config["a.b"]`) and a `message`, and never contains a value, because values can be secrets. A refusal
+`devices[0].points[1].address` (a key that is empty or contains `.`, `[`, `]`, a quote or whitespace, such as `a.b`,
+is written as `config["a.b"]`) and a `message`, and never contains a value, because values can be secrets. A refusal
 is an answer, not an RPC error: an RPC error from `Configure` is a failure of the plugin. Go plugins decode the
 section with `sdk.DecodeInput`, `sdk.DecodeProcessor` and `sdk.DecodeOutput`, which ignore the keys they do not know
 so that a newer agent can add some; do likewise.
@@ -191,12 +200,13 @@ so that a newer agent can add some; do likewise.
 
 `Subscribe` sends `InputEvent`s of three kinds: `sample`, `answered(device)` (the device answered, also when it had no
 new samples) and `health(connected, read_error)`, where `read_error` is empty or one of `timeout`, `connection`,
-`exception`, `decode`. When the stream is cancelled (or the plugin is shutting down) the handler returns normally, with status OK and not
-with an error; an error from `Run` ends the stream with that error. A plugin never sends births or deaths: the agent
-derives them. A sample carries the device and
-signal keys, a UTC timestamp, exactly one value (`double`, `int`, `bool` or `string`; NaN and infinities are refused),
-a quality (`GOOD`, `UNCERTAIN`, `BAD`) and a priority (`CRITICAL`, `BULK`). The `UNSPECIFIED` enum values are never
-valid on the wire.
+`exception`, `decode`. When the stream is cancelled (or the plugin is shutting down) the handler returns normally, with
+status OK and not with an error. An error returned by the author's `Run` ends the stream with that error as its
+status: the status the error already carries, `CANCELED` or `DEADLINE_EXCEEDED` for a context error while the stream
+is still live, and `UNKNOWN` with the error text for any other error. A plugin never sends births or deaths: the agent
+derives them. A sample carries the device and signal keys, a UTC timestamp, exactly one value (`double`, `int`, `bool`
+or `string`; NaN and infinities are refused), a quality (`GOOD`, `UNCERTAIN`, `BAD`) and a priority (`CRITICAL`,
+`BULK`). The `UNSPECIFIED` enum values are never valid on the wire.
 
 ### Processor stream
 
@@ -233,8 +243,8 @@ Not part of the wire contract, but what a host can observe from a Go plugin:
   last `Configure` was refused; an empty `instance_id` gets `INVALID_ARGUMENT`.
 - A new `Configure` of an instance cancels its running stream first; a refused `Configure` leaves the instance
   unconfigured.
-- A panic in the author's code fails that one call with `INTERNAL`, writes one line to stderr (the type of the panic and,
-  for a Go runtime error such as an index out of range, the text of that error; never request data) and the plugin
+- A panic in the author's code fails that one call with `INTERNAL`, writes one line to stderr (the type of the panic
+  and, for a Go runtime error such as an index out of range, the text of that error; never request data) and the plugin
   keeps serving.
 - Messages are limited to 16 MB in both directions.
 
@@ -261,9 +271,10 @@ The conformance check `info` makes these comparisons and also requires that the 
   UTF-16 code units) and does not normalise numbers.
 - No whitespace outside strings.
 - Numbers exactly as written (`1.0` stays `1.0`, `1e2` stays `1e2`).
-- Strings in UTF-8 with only the escapes JSON requires: `\"`, `\\`, `\b`, `\f`, `\n`, `\r`, `\t` and `\u00xx` (lower-case
-  hexadecimal) for the other characters below U+0020. Every other character, `/` and U+007F included, is written
-  as itself, and an escape such as `\u00e9` in the input is decoded and written as the character itself (a literal e with acute accent).
+- Strings in UTF-8 with only the escapes JSON requires: `\"`, `\\`, `\b`, `\f`, `\n`, `\r`, `\t` and `\u00xx`
+  (lower-case hexadecimal) for the other characters below U+0020. Every other character, `/` and U+007F included, is
+  written as itself, and an escape such as `\u00e9` in the input is decoded and written as the character itself (a
+  literal e with acute accent).
 
 ### `--manifest`
 

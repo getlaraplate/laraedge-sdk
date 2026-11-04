@@ -223,19 +223,19 @@ git commit -m "fix(examples): no sleep waits, jsonl cannot duplicate a line afte
 **Files:**
 - Modify: `scripts/*`, `README.md`, `CONTRIBUTING.md`, `docs/handshake.md`, `.gitattributes`, `.editorconfig`
 
-- [ ] **Step 1: Verify S13 and S14** item by item.
+- [x] **Step 1: Verify S13 and S14** item by item.
 
-- [ ] **Step 2: Fix**: the protoc download sets the executable bit only on the binary it runs; the README copy rule
+- [x] **Step 2: Fix**: the protoc download sets the executable bit only on the binary it runs; the README copy rule
   matches the spec's wording; CONTRIBUTING introduces `generate.sh` where the reader needs it; drop `.gitattributes`
   or `.editorconfig` lines that do nothing for this repository (keep what CI or the generator relies on); wrap
   `docs/handshake.md` to its width and correct the "an error from Run ends the stream" sentence to what `sdk`
   does. The shared `ConfigureRequest` and the `Health` name are protocol shapes: no change (Global Constraints),
   record the reason in `docs/handshake.md`.
 
-- [ ] **Step 3: Verify**: `go test ./... -count=1`; `scripts/generate.sh` (or the CI check that the generated code is
+- [x] **Step 3: Verify**: `go test ./... -count=1`; `scripts/generate.sh` (or the CI check that the generated code is
   current) reports no diff.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add scripts README.md CONTRIBUTING.md docs .gitattributes .editorconfig
