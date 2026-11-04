@@ -300,6 +300,13 @@ func TestEachDefectFailsItsCheck(t *testing.T) {
 			name: "Process stream ended by the processor before the suite closed its side", env: "BROKEN_ENDS_EARLY=1",
 			pass: true, detail: "the second-stream rule was not probed",
 		},
+		{
+			// As above, and the processor emits a sample on its running (second) stream just before it
+			// refuses the third: a sample is not the end of the second stream, so this still passes.
+			name: "Process stream ended early, then a sample on the running stream before a refusal",
+			env:  "BROKEN_ENDS_EARLY=1 BROKEN_SAMPLE_ON_REFUSAL=1", pass: true,
+			detail: "the second-stream rule was not probed",
+		},
 		{name: "Shutdown past its deadline", env: "BROKEN_SLOW_SHUTDOWN=1", failing: "shutdown", detail: "still running"},
 		{
 			name: "plugin gone before Shutdown", env: "BROKEN_EXIT_BEFORE_SHUTDOWN=1", failing: "shutdown",

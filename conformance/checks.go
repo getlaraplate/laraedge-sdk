@@ -626,29 +626,41 @@ func (s *suite) refusedSecondProcess(sess *session, instance string, ended <-cha
 		// on its own refuses a third one; a newest-wins processor serves it in place of the second.
 		third := probeProcess(ctx, sess, instance)
 		var thirdErr error
-		thirdAnswered := false
+		thirdAnswered, replaced := false, false
 		if !answered {
 			wait := time.NewTimer(s.timeout / 2)
-			select {
-			case thirdErr = <-third:
-				thirdAnswered = true
-			case <-second:
-				// The second stream ended once the third was opened: it was replaced.
-			case <-wait.C:
+			running, timedOut := second, false
+			for !thirdAnswered && !replaced && !timedOut {
+				select {
+				case thirdErr = <-third:
+					thirdAnswered = true
+				case secondErr := <-running:
+					// A sample on the second stream is not its end; an error or EOF is: it was replaced.
+					// After a sample the probe has nothing more to read there (a nil channel never fires).
+					replaced = secondErr != nil
+					running = nil
+				case <-wait.C:
+					timedOut = true
+				}
 			}
 			wait.Stop()
 		} else {
 			thirdErr, thirdAnswered = s.awaitProbe(third)
 		}
-		if thirdAnswered && status.Code(thirdErr) == codes.AlreadyExists {
+		thirdCode := status.Code(thirdErr)
+		if thirdAnswered && thirdCode == codes.AlreadyExists {
 			return "", false
 		}
 		if s.ctx.Err() != nil {
 			return fmt.Sprintf("the run was interrupted while a second Process stream was probed: %v", s.ctx.Err()), true
 		}
-		return "a second Process stream of the instance was served while the first was open, the first then ended, " +
-			"and a third stream was served in place of the second: a new stream must not replace the running one; " +
-			rule, true
+		const served = "a second Process stream of the instance was served while the first was open and the first then ended; "
+		if thirdAnswered && thirdErr != nil {
+			return fmt.Sprintf(served+"a third stream, opened while the second was open, was refused with %s (%v); %s",
+				thirdCode, thirdErr, rule), true
+		}
+		return served + "a third stream was served in place of the second: a new stream must not replace the running " +
+			"one; " + rule, true
 	case !answered:
 		return fmt.Sprintf("a second Process stream of the instance, opened while the first was open, was not refused "+
 			"within %v; %s", s.timeout/2, rule), true

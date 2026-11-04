@@ -32,6 +32,8 @@
 //	                            refused
 //	BROKEN_NEWEST_WINS=1        a new Process stream of a processor instance ends the running one
 //	                            with OK and is served in its place
+//	BROKEN_SAMPLE_ON_REFUSAL=1  before refusing a second Process stream, the processor emits one
+//	                            sample on the running one (allowed: a processor may emit any time)
 //	BROKEN_EXIT_BEFORE_SHUTDOWN=1 after answering DUPLICATE, exit 0 at the next call, unanswered
 //
 // A section is valid unless it has the top-level member "refuse": true. A section with a
@@ -121,6 +123,7 @@ type plugin struct {
 	sections map[string]json.RawMessage // key: kind + "/" + instance
 	active   map[string]bool            // key: kind + "/" + instance, with a running stream
 	newest   map[string]chan struct{}   // BROKEN_NEWEST_WINS: closed when a newer stream replaces it
+	running  map[string]func()          // BROKEN_SAMPLE_ON_REFUSAL: emits a sample on the running stream
 	seen     map[string]bool            // output instance + "/" + message_id
 
 	shutdownOnce sync.Once
@@ -142,6 +145,7 @@ func newPlugin() *plugin {
 		sections: map[string]json.RawMessage{},
 		active:   map[string]bool{},
 		newest:   map[string]chan struct{}{},
+		running:  map[string]func(){},
 		seen:     map[string]bool{},
 		shutdown: make(chan struct{}),
 	}
@@ -377,16 +381,56 @@ func (s *processorService) Process(stream pb.Processor_ProcessServer) error {
 			return nil
 		}
 	}
-	release, err := s.p.claimStream("processor", first.GetStart().GetInstanceId(), defect("BROKEN_CONCURRENT_PROCESS"))
+	id := first.GetStart().GetInstanceId()
+	release, err := s.p.claimStream("processor", id, defect("BROKEN_CONCURRENT_PROCESS"))
 	if err != nil {
+		if defect("BROKEN_SAMPLE_ON_REFUSAL") {
+			s.p.mu.Lock()
+			emit := s.p.running[id]
+			s.p.mu.Unlock()
+			if emit != nil {
+				emit()
+			}
+		}
 		return err
 	}
 	defer release()
+	if defect("BROKEN_SAMPLE_ON_REFUSAL") {
+		locked := &lockedStream{Processor_ProcessServer: stream}
+		stream = locked
+		s.p.mu.Lock()
+		s.p.running[id] = func() {
+			for _, device := range cfg.Devices {
+				for _, signal := range device.Signals {
+					_ = locked.Send(&pb.ProcessorOut{Sample: sample(device.Device, signal.Signal, 1)})
+					return
+				}
+			}
+		}
+		s.p.mu.Unlock()
+		defer func() {
+			s.p.mu.Lock()
+			delete(s.p.running, id)
+			s.p.mu.Unlock()
+		}()
+	}
 	if defect("BROKEN_NEVER_READS") {
 		<-stream.Context().Done()
 		return stream.Context().Err()
 	}
 	return s.answer(stream, cfg)
+}
+
+// lockedStream serialises the sends of a Process stream that two goroutines emit on.
+type lockedStream struct {
+	pb.Processor_ProcessServer
+	mu sync.Mutex
+}
+
+func (l *lockedStream) Send(out *pb.ProcessorOut) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.Processor_ProcessServer.Send(out)
 }
 
 // answer reads the records of a started Process stream and answers them until the client ends
