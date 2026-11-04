@@ -65,7 +65,7 @@ repository (the protocol contract). The inventory below was verified against the
 | S7 | T3 | test gaps: max depth, local and http `$ref`, escaped surrogate pair, subscribe-only kind refusing poll, a misnamed test, key leakage; a stale comment; an overlong doc line | verify, `manifest/*_test.go` | 3 | FIXED `5909f87`: the missing tests, the misnamed test, the stale comment, the overlong line. The 512/513 depth boundary test, `f523beb`, found an off-by-one: 513 levels were accepted, now refused as documented |
 | S8 | T7 | conformance accepts `RETRY_AFTER` without `retry_after` and `REJECT_INVALID` without `reason`, which `docs/handshake.md:205-206` require (the plan read the `retry_after` parenthetical as a requirement; a ruling read it as optional, see Resolution) | `conformance/checks.go` | 4 | PARTIAL by ruling: `REJECT_INVALID` without `reason` fails `output.send`, `ef8153b`. `RETRY_AFTER` without `retry_after` is not enforced (dropped in `ee3997b`): the SDK documents a zero delay as "the agent uses its own backoff", the agent tolerates the absence, and `v0.1.2` is promised as a drop-in; `docs/handshake.md` now says "optionally with `retry_after`". `BROKEN_RETRY_AFTER_BARE` pins that `output.send` passes |
 | S9 | T7 | `"records": null` in a fixture reports "list is empty" | `conformance/records.go:92` | 4 | FIXED `ef8153b`: `"records": null` reports `records must be a list` |
-| S10 | T7 | the one-`Process`-stream rule (second stream refused `ALREADY_EXISTS`) is written but not probed | verify, `conformance/checks.go` | 4 | FIXED `ef8153b`, `163489f`, `ee3997b`, `2844c2b`: `processor.signals` probes a second stream while the first is open (refused `ALREADY_EXISTS` or fails); not probed only when the processor ended its stream on its own first; a processor that ends its running stream to serve the newest one fails |
+| S10 | T7 | the one-`Process`-stream rule (second stream refused `ALREADY_EXISTS`) is written but not probed | verify, `conformance/checks.go` | 4 | FIXED `ef8153b`, `163489f`, `ee3997b`, `2844c2b`, `41597aa`: `processor.signals` probes a second stream while the first is open (refused `ALREADY_EXISTS` or fails); not probed only when the processor ended its stream on its own first; a processor that ends its running stream to serve the newest one fails |
 | S11 | T6 | `waitForTickers` polls with `time.Sleep(1ms)` | `examples/simulated-counter/counter_test.go:320-332` | 5 | FIXED `a3138a3`: `waitForTickers` waits on a channel the fake clock closes |
 | S12 | T6 | jsonl: a failed `Sync` after a good `Write` may duplicate a line on resend; no parent directory fsync; enum words depend on `iota` order; `Process` cancel return conventions differ; fixture carries a `driver` key outside S7; `answered` per point on poll | verify, `examples/jsonl/sink.go:155,180`, `examples/` | 5 | FIXED `a3138a3`, `66892bf`, `84c5864`, `f798d62`: truncate back after a failed `Write` or `Sync`, parent directory fsync, enum words switch on constants, per-path file state, replacement and rotation noticed. Cancel return conventions, the `driver` key and `answered` per point: decided, written in `examples/README.md` |
 | S13 | T2 | `chmod +x` after unzip in the protoc download path; one `ConfigureRequest`/`Response` shared by the kinds; `Health` shadows `grpc.health.v1.Health` in imports | verify, `scripts/`, `proto/` | 6 | FIXED `f906dc6`: the executable bit set on `bin/protoc` only. Shared `ConfigureRequest` and the `Health` name: protocol shapes, no change, reason in `docs/handshake.md` (Services) |
@@ -273,13 +273,13 @@ git commit -m "docs: README, CONTRIBUTING and handshake.md minors"
 ## Delivery status (2026-11-04)
 
 Tasks 1 to 6 are built on branch `chore/deferred-minors-cleanup`, each reviewed. A whole-branch review followed, with
-one fix wave of 17 items (`ee3997b` to `8f2cf1c`). Its re-review found four residual minors, fixed in Task 7
-(`2844c2b` to `85083ca`). Commits run from `8d12417` to `85083ca`, plus the closing commit. Every inventory row has its
-resolution in the table above. `proto/`, `pluginv1/`, `go.mod` and `go.sum` are unchanged, and the golden descriptor
-test passes. No exported identifier or signature changed. Windows CI was green on pull request
-getlaraplate/laraedge-sdk#3 at `8d12417` and `66892bf`. Task 7 Step 1 passed on Linux:
-`go test ./... -race -count=1`, `go vet ./...`, `GOOS=windows go vet ./...`, `gofmt -l .`, and the conformance command
-on the three examples as CI runs it (simulated-counter 12 checks, line-state 11, jsonl 12).
+one fix wave of 17 items (`ee3997b` to `8f2cf1c`). Its re-review found four residual minors, fixed in Task 7 (`2844c2b`
+to `85083ca`), and the Task 7 review's minors (`41597aa`, `f821c0e`). Commits run from `8d12417` to `f821c0e`, plus the
+closing commits. Every inventory row has its resolution in the table above. `proto/`, `pluginv1/`, `go.mod` and `go.sum`
+are unchanged, and the golden descriptor test passes. No exported identifier or signature changed. Windows CI was green
+on pull request getlaraplate/laraedge-sdk#3 at `8d12417` and `66892bf`. Task 7 Step 1 passed on Linux: `go test ./...
+-race -count=1`, `go vet ./...`, `GOOS=windows go vet ./...`, `gofmt -l .`, and the conformance command on the three
+examples as CI runs it (simulated-counter 12 checks, line-state 11, jsonl 12).
 
 **Divergences from the plan**, each with its reason (the rulings are in "Controller rulings" below):
 
@@ -314,11 +314,14 @@ on the three examples as CI runs it (simulated-counter 12 checks, line-state 11,
   - An interrupted run is reported as interrupted, not as "not refused".
   - Test comments and assertions; the CONTRIBUTING wrap.
 - **Residuals of the re-review (Task 7).**
-  - R1 `2844c2b`: a processor that serves the second stream and ends the first one OK used to pass as "not probed".
-    Now "not probed" is reported only when the first stream had already ended when the probe started. When it ends
-    after the second stream was opened, a third stream decides: refused, the first had ended on its own (pass, not
-    probed); served, the processor replaces its running stream (fail). The post-answer grace now only tells whether
-    the first stream ended. New broken-plugin defect: `BROKEN_NEWEST_WINS`.
+  - R1 `2844c2b`, `41597aa`: a processor that serves the second stream and ends the first one OK used to pass as
+    "not probed". Now "not probed" is reported only when the first stream had already ended when the probe started.
+    When it ends after the second stream was opened, a third stream decides. Refused with `ALREADY_EXISTS`: the first
+    had ended on its own (pass, not probed). Served, or the second stream ends: the processor replaces its running
+    stream (fail). Refused with another code: fail, naming the code. A sample on the second stream is not its end.
+    The post-answer grace now only tells whether the first stream ended. New broken-plugin defects:
+    `BROKEN_NEWEST_WINS`, `BROKEN_SAMPLE_ON_REFUSAL`.
+  - Task 7 review: the jsonl `refresh` doc rewrapped and the `identity` comment corrected, `f821c0e`.
   - R2 `f798d62`: jsonl records identity and size at the clean point too.
   - R3 `f9806fe`: the Output outcomes paragraph of `docs/handshake.md` is wrapped.
   - R4 `85083ca`: the `BROKEN_RETRY_AFTER_BARE` comment says why `output.duplicate` fails.
