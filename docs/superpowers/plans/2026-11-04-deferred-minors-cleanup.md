@@ -118,21 +118,21 @@ git commit -m "fix(handshake): assign the plugin to its job before it runs on Wi
 - Test: `sdk/*_test.go`
 - Docs: `docs/handshake.md` (S4 serialisation note)
 
-- [ ] **Step 1: Write the failing test** (S3, Review Focus 2): a fake stream whose `Send` fails on the second item;
+- [x] **Step 1: Write the failing test** (S3, Review Focus 2): a fake stream whose `Send` fails on the second item;
   every `emit` call after the failure returns a non-nil error, under `-race -count=50`.
 
-- [ ] **Step 2: Implement S3.** Once a send error is recorded, `emit` returns it (or `errStreamEnded`) without handing
+- [x] **Step 2: Implement S3.** Once a send error is recorded, `emit` returns it (or `errStreamEnded`) without handing
   the item to the pump; the window between the failure and the cancel is closed by checking the recorded error under
   the same synchronisation the pump uses.
 
-- [ ] **Step 3: S4.** Verify: an inbound enum value outside the known range is refused with `INVALID_ARGUMENT` (test);
+- [x] **Step 3: S4.** Verify: an inbound enum value outside the known range is refused with `INVALID_ARGUMENT` (test);
   the concurrency of `Send`/`Probe`/`Browse` with a re-`Configure` is documented in `docs/handshake.md` as the
   author's responsibility (the SDK does not serialise them), with the reason; a deterministic back-pressure test
   (a slow consumer, a bounded number of in-flight items) if the pump has a bound to test, else record why not.
 
-- [ ] **Step 4: Verify**: `go test ./sdk -race -count=20`. Expected: PASS.
+- [x] **Step 4: Verify**: `go test ./sdk -race -count=20`. Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add sdk docs

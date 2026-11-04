@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/getlaraplate/laraedge-sdk/manifest"
@@ -250,4 +251,48 @@ func TestOutputInstancesAreIndependent(t *testing.T) {
 	}
 	_, err := c.Send(testCtx(t), sendRequest("c", "m"))
 	wantCode(t, err, codes.FailedPrecondition)
+}
+
+// TestOutputEnumOutsideItsRangeNamesTheField: the INVALID_ARGUMENT that refuses an inbound enum
+// outside its defined values names the enum's field and where it is in the batch.
+func TestOutputEnumOutsideItsRangeNamesTheField(t *testing.T) {
+	c := pb.NewOutputClient(start(t, outputPlugin(&fakeOutput{})).conn)
+	configureOutput(t, c, "a")
+	fields := []string{"quality", "priority", "event kind", "data type"}
+	cases := map[string]struct {
+		req  *pb.SendRequest
+		want []string
+	}{
+		"loss priority 257": {&pb.SendRequest{InstanceId: "a", Batch: &pb.Batch{MessageId: "m", Losses: []*pb.LossMarker{{Priority: 257, Count: 1}}}}, []string{"losses[0]", "priority"}},
+	}
+	for name, r := range enumOutOfRangeRecords() {
+		want := []string{"records[0]"}
+		for _, f := range fields {
+			if strings.HasPrefix(name, f) {
+				want = append(want, f)
+			}
+		}
+		if strings.HasPrefix(name, "data type") {
+			want = append(want, "signals[0]")
+		}
+		if len(want) == 1 {
+			t.Fatalf("%s: no field named by the case", name)
+		}
+		cases["record with "+name] = struct {
+			req  *pb.SendRequest
+			want []string
+		}{sendRequest("a", "m", r), want}
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := c.Send(testCtx(t), tc.req)
+			wantCode(t, err, codes.InvalidArgument)
+			msg := status.Convert(err).Message()
+			for _, w := range tc.want {
+				if !strings.Contains(msg, w) {
+					t.Errorf("message %q does not name %q", msg, w)
+				}
+			}
+		})
+	}
 }

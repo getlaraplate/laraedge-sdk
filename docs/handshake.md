@@ -163,7 +163,13 @@ concurrently: for example `Probe` while a `Subscribe` stream of the same instanc
 instance while another streams. The conformance suite configures every fixture on its own instance
 (`conformance-<kind>-valid-<n>` and `conformance-<kind>-invalid-<n>`, which is not the `id` of the section), so a
 plugin must tolerate many configured instances at once. The Go SDK does not serialise `Send`, `Probe` and `Browse`
-against a new `Configure` of the same instance.
+against a new `Configure` of the same instance: a `Send` or `Probe` already running when the host re-configures the
+instance keeps running while the author's `Configure` does. Making them safe together is the plugin author's
+responsibility. The SDK does not hold a lock around them because it cannot know which state they share: one lock
+per instance would make a `Configure` (10 s deadline) wait behind a slow `Send` (30 s) and every call wait behind a
+`Configure`, while the author can guard exactly what is shared, for example by building the new configuration aside
+and swapping it in atomically once `Configure` accepts it. Streams are different: a new `Configure` cancels the
+running `Subscribe` or `Process` stream and waits for it to end before calling the author.
 
 ### Configure
 
