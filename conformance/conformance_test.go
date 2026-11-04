@@ -277,6 +277,10 @@ func TestEachDefectFailsItsCheck(t *testing.T) {
 			name: "second concurrent Process stream served", env: "BROKEN_CONCURRENT_PROCESS=1", failing: "processor.signals",
 			detail: "ALREADY_EXISTS",
 		},
+		{
+			name: "second Process stream served and the first never ends", env: "BROKEN_CONCURRENT_PROCESS=1 BROKEN_NEVER_ENDS=1",
+			failing: "processor.signals", detail: "ALREADY_EXISTS",
+		},
 		{name: "Shutdown past its deadline", env: "BROKEN_SLOW_SHUTDOWN=1", failing: "shutdown", detail: "still running"},
 		{
 			name: "plugin gone before Shutdown", env: "BROKEN_EXIT_BEFORE_SHUTDOWN=1", failing: "shutdown",
@@ -293,7 +297,7 @@ func TestEachDefectFailsItsCheck(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			report := runSuite(t, pluginDirs["broken"], 3*time.Second, tt.env)
+			report := runSuite(t, pluginDirs["broken"], 3*time.Second, strings.Fields(tt.env)...)
 			assertReport(t, report, checkNames(true, true, true), tt.failing, tt.skipped...)
 			if tt.detail != "" {
 				assertDetail(t, report, tt.failing, tt.detail)

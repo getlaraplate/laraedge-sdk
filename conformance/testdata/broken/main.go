@@ -22,6 +22,7 @@
 //	BROKEN_SEND_ERROR=1         every Send fails with an error
 //	BROKEN_RETRY_AFTER_BARE=1   every Send answers RETRY_AFTER without retry_after
 //	BROKEN_REJECT_BARE=1        every Send answers REJECT_INVALID without a reason
+//	BROKEN_NEVER_ENDS=1         a Process stream does not end when the client closes its side
 //	BROKEN_CONCURRENT_PROCESS=1 a second Process stream of a processor instance is served, not
 //	                            refused
 //	BROKEN_EXIT_BEFORE_SHUTDOWN=1 after answering DUPLICATE, exit 0 at the next call, unanswered
@@ -344,6 +345,9 @@ func (s *processorService) Process(stream pb.Processor_ProcessServer) error {
 	for {
 		msg, err := stream.Recv()
 		if err == io.EOF {
+			if defect("BROKEN_NEVER_ENDS") {
+				<-stream.Context().Done()
+			}
 			return nil
 		}
 		if err != nil {

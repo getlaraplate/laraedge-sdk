@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -468,8 +469,11 @@ func (s *suite) checkProcessorSignals(sess *session, instance string) {
 		source = "the records of conformance.json"
 	}
 
-	ctx, cancel := context.WithTimeout(s.ctx, s.timeout)
+	// The timeout of the samples starts when the suite ends its side of the stream, so the
+	// second-stream probe does not shorten it.
+	ctx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
+	var expired atomic.Bool
 	stream, err := pb.NewProcessorClient(sess.conn).Process(ctx)
 	if err != nil {
 		s.fail(name, "Process: %v", err)
@@ -514,7 +518,15 @@ func (s *suite) checkProcessorSignals(sess *session, instance string) {
 	if sendErr == nil {
 		sendErr = stream.CloseSend()
 	}
+	deadline := time.AfterFunc(s.timeout, func() {
+		expired.Store(true)
+		cancel()
+	})
+	defer deadline.Stop()
 	r := <-collected
+	if expired.Load() && r.err != nil {
+		r.err = status.Error(codes.DeadlineExceeded, r.err.Error())
+	}
 	var problems []string
 	for _, sample := range r.samples {
 		key := [2]string{sample.GetDevice(), sample.GetSignal()}
@@ -525,10 +537,6 @@ func (s *suite) checkProcessorSignals(sess *session, instance string) {
 	slices.Sort(problems)
 	problems = slices.Compact(problems)
 	nothing := "so nothing could be checked"
-	if secondErr != "" && len(problems) == 0 && r.err == nil && sendErr == nil && len(r.samples) > 0 {
-		s.fail(name, "%s", secondErr)
-		return
-	}
 	if s.processorRecords == nil {
 		nothing += `; add a "records" list to the first valid processor fixture of conformance.json with records ` +
 			"the processor answers"
@@ -546,6 +554,8 @@ func (s *suite) checkProcessorSignals(sess *session, instance string) {
 		s.fail(name, "the stream ended without a sample for %s, %s", source, nothing)
 	case len(r.samples) == 0:
 		s.fail(name, "no sample within %v for %s, %s", s.timeout, source, nothing)
+	case secondErr != "":
+		s.fail(name, "%s", secondErr)
 	default:
 		s.pass(name, "%d samples, all of declared signals, for %s", len(r.samples), source)
 	}
