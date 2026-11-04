@@ -575,6 +575,9 @@ func (f *failingStream) Send(int) error {
 // TestEmitNeverSucceedsAfterTheSendFailed: once the stream's Send has failed, no emit reports
 // success, neither one called after the failure nor one racing it. Every emit that returned nil
 // handed its item to Send, so the nil results equal the items Send was given.
+//
+// It is a regression guard: the race between an emit and the failing Send is hit only on some
+// runs, so before the fix it failed probabilistically, which is why the plan runs it with -count.
 func TestEmitNeverSucceedsAfterTheSendFailed(t *testing.T) {
 	ctx, cancel := context.WithCancel(testCtx(t))
 	defer cancel()

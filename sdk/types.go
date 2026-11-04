@@ -228,7 +228,8 @@ type Outcome struct {
 	Kind OutcomeKind
 	// RetryAfter is used with OutcomeRetryAfter; zero lets the agent use its own backoff.
 	RetryAfter time.Duration
-	// Reason is used with OutcomeRejectInvalid. It must not contain values from the batch.
+	// Reason is used with OutcomeRejectInvalid, and must then be non-empty: the protocol requires
+	// it and the conformance suite checks it. It must not contain values from the batch.
 	Reason string
 }
 

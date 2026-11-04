@@ -258,30 +258,15 @@ func TestOutputInstancesAreIndependent(t *testing.T) {
 func TestOutputEnumOutsideItsRangeNamesTheField(t *testing.T) {
 	c := pb.NewOutputClient(start(t, outputPlugin(&fakeOutput{})).conn)
 	configureOutput(t, c, "a")
-	fields := []string{"quality", "priority", "event kind", "data type"}
-	cases := map[string]struct {
+	type sendCase struct {
 		req  *pb.SendRequest
 		want []string
-	}{
+	}
+	cases := map[string]sendCase{
 		"loss priority 257": {&pb.SendRequest{InstanceId: "a", Batch: &pb.Batch{MessageId: "m", Losses: []*pb.LossMarker{{Priority: 257, Count: 1}}}}, []string{"losses[0]", "priority"}},
 	}
 	for name, r := range enumOutOfRangeRecords() {
-		want := []string{"records[0]"}
-		for _, f := range fields {
-			if strings.HasPrefix(name, f) {
-				want = append(want, f)
-			}
-		}
-		if strings.HasPrefix(name, "data type") {
-			want = append(want, "signals[0]")
-		}
-		if len(want) == 1 {
-			t.Fatalf("%s: no field named by the case", name)
-		}
-		cases["record with "+name] = struct {
-			req  *pb.SendRequest
-			want []string
-		}{sendRequest("a", "m", r), want}
+		cases["record with "+name] = sendCase{sendRequest("a", "m", r), append([]string{"records[0]"}, enumCaseFields(t, name)...)}
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
