@@ -541,8 +541,6 @@ func keywordMessage(k jsonschema.ErrorKind) string {
 		return "has duplicate items"
 	case "required", "dependentRequired", "dependencies":
 		return "is missing a required property"
-	case "dependentSchemas":
-		return "does not satisfy a schema that another property requires"
 	}
 	return "does not satisfy schema keyword " + keyword
 }

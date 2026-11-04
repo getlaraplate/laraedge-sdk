@@ -462,6 +462,9 @@ func TestProblemsSortIndexesNumerically(t *testing.T) {
 	}
 }
 
+// TestDependentSchemasHasAReadableMessage pins current library behaviour: jsonschema v6 reports a
+// failed dependentSchemas by the leaf of the dependent schema (here false, which has no keyword),
+// never by dependentSchemas itself, so the message is the generic one.
 func TestDependentSchemasHasAReadableMessage(t *testing.T) {
 	m := mustManifest(t, `{"name":"x","version":"1","protocol_versions":["v1"],"kinds":{"processor":{"config_schema":{
 	  "type":"object","dependentSchemas":{"credit":false}}}}}`)
@@ -471,11 +474,10 @@ func TestDependentSchemasHasAReadableMessage(t *testing.T) {
 		t.Fatal("want a problem")
 	}
 	for _, p := range problems {
-		if strings.Contains(p.Message, "dependentSchemas") {
-			t.Errorf("message is not readable: %+v", p)
+		if p.Message != "value does not satisfy the schema" {
+			t.Errorf("problem %+v, want the message %q", p, "value does not satisfy the schema")
 		}
 	}
-	t.Logf("%+v", problems)
 }
 
 func TestValidateLocalRefAndSubscribeOnlyKind(t *testing.T) {

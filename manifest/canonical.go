@@ -43,10 +43,8 @@ func Canonical(raw []byte) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
+// writeCanonical writes the next value, which is inside depth objects or arrays.
 func writeCanonical(dec *json.Decoder, out *bytes.Buffer, depth int) error {
-	if depth > maxCanonicalDepth {
-		return errors.New("canonical json: nesting too deep")
-	}
 	tok, err := dec.Token()
 	if err != nil {
 		if errors.Is(err, io.EOF) {
@@ -57,6 +55,9 @@ func writeCanonical(dec *json.Decoder, out *bytes.Buffer, depth int) error {
 
 	switch t := tok.(type) {
 	case json.Delim:
+		if depth >= maxCanonicalDepth {
+			return errors.New("canonical json: nesting too deep")
+		}
 		if t == '{' {
 			return writeCanonicalObject(dec, out, depth)
 		}

@@ -64,8 +64,8 @@ func TestCanonicalDepthLimit(t *testing.T) {
 	if _, err := manifest.Canonical([]byte(nest(512))); err != nil {
 		t.Fatalf("512 levels: %v", err)
 	}
-	if got, err := manifest.Canonical([]byte(nest(514))); err == nil {
-		t.Fatalf("514 levels: want an error, got %d bytes", len(got))
+	if got, err := manifest.Canonical([]byte(nest(513))); err == nil {
+		t.Fatalf("513 levels: want an error, got %d bytes", len(got))
 	}
 }
 
