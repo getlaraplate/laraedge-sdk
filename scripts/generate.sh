@@ -29,6 +29,7 @@ if [ "${PROTOC_DOWNLOAD:-}" = "1" ]; then
   mkdir "$tmp/protoc"
   unzip -q "$tmp/protoc.zip" -d "$tmp/protoc"
   protoc_bin="$tmp/protoc/bin/protoc"
+  chmod +x "$protoc_bin"
 fi
 
 if ! have="$("$protoc_bin" --version 2>/dev/null)"; then

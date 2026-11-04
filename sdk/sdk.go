@@ -302,14 +302,19 @@ func streamResult(ctx context.Context, runErr, sendErr error) error {
 var errStreamEnded = errors.New("sdk: the stream has ended")
 
 // pump runs fn, the author's streaming function, in its own recovered goroutine and delivers what
-// it emits to send, on the calling goroutine and in order. emit hands one item over at a time, so
+// it emits to send, on the calling goroutine and in order. emit hands one item over at a time
+// through an unbuffered channel, so at most one item is in flight (the one send is delivering) and
 // an author that outpaces send is held back instead of buffered; it fails once ctx is done. pump
-// returns when fn has returned. A failing send cancels the stream (cancel) and later items are
-// dropped.
+// returns when fn has returned. A failing send cancels the stream (cancel) and pump stops taking
+// items: from then on emit can only see ctx done, so it never reports success for an item that
+// would be dropped. An emit that returned nil has had its item handed to send.
 func pump[T any](ctx context.Context, cancel context.CancelFunc, log *logger, where string,
 	fn func(emit func(T) error) error, send func(T) error,
 ) (runErr, sendErr error) {
 	items := make(chan T)
+	// receive is items until a send fails, then nil: a receive from a nil channel never
+	// proceeds, so no emit can hand over an item once the failure is recorded.
+	receive := items
 	done := make(chan error, 1)
 	go func() {
 		var err error
@@ -329,12 +334,11 @@ func pump[T any](ctx context.Context, cancel context.CancelFunc, log *logger, wh
 	}()
 	for {
 		select {
-		case item := <-items:
-			if sendErr == nil {
-				if err := send(item); err != nil {
-					sendErr = err
-					cancel()
-				}
+		case item := <-receive:
+			if err := send(item); err != nil {
+				sendErr = err
+				receive = nil
+				cancel()
 			}
 		case runErr = <-done:
 			return runErr, sendErr

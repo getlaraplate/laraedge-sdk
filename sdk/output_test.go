@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/getlaraplate/laraedge-sdk/manifest"
@@ -250,4 +251,33 @@ func TestOutputInstancesAreIndependent(t *testing.T) {
 	}
 	_, err := c.Send(testCtx(t), sendRequest("c", "m"))
 	wantCode(t, err, codes.FailedPrecondition)
+}
+
+// TestOutputEnumOutsideItsRangeNamesTheField: the INVALID_ARGUMENT that refuses an inbound enum
+// outside its defined values names the enum's field and where it is in the batch.
+func TestOutputEnumOutsideItsRangeNamesTheField(t *testing.T) {
+	c := pb.NewOutputClient(start(t, outputPlugin(&fakeOutput{})).conn)
+	configureOutput(t, c, "a")
+	type sendCase struct {
+		req  *pb.SendRequest
+		want []string
+	}
+	cases := map[string]sendCase{
+		"loss priority 257": {&pb.SendRequest{InstanceId: "a", Batch: &pb.Batch{MessageId: "m", Losses: []*pb.LossMarker{{Priority: 257, Count: 1}}}}, []string{"losses[0]", "priority"}},
+	}
+	for name, r := range enumOutOfRangeRecords() {
+		cases["record with "+name] = sendCase{sendRequest("a", "m", r), append([]string{"records[0]"}, enumCaseFields(t, name)...)}
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := c.Send(testCtx(t), tc.req)
+			wantCode(t, err, codes.InvalidArgument)
+			msg := status.Convert(err).Message()
+			for _, w := range tc.want {
+				if !strings.Contains(msg, w) {
+					t.Errorf("message %q does not name %q", msg, w)
+				}
+			}
+		})
+	}
 }

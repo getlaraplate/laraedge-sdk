@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -549,6 +550,127 @@ func TestStopContextIsBounded(t *testing.T) {
 		got := <-calls
 		if !got.ok || got.left > deadline {
 			t.Errorf("Stop of %s at Shutdown: %+v, want the Shutdown deadline (%v)", got.instance, got, deadline)
+		}
+	}
+}
+
+// failingStream is a stream whose Send fails from the item numbered failAt on; failed is closed
+// when the first failure is returned.
+type failingStream struct {
+	failAt int
+	sent   atomic.Int32
+	failed chan struct{}
+}
+
+func (f *failingStream) Send(int) error {
+	if n := int(f.sent.Add(1)); n >= f.failAt {
+		if n == f.failAt {
+			close(f.failed)
+		}
+		return errors.New("broken pipe")
+	}
+	return nil
+}
+
+// TestEmitNeverSucceedsAfterTheSendFailed: once the stream's Send has failed, no emit reports
+// success, neither one called after the failure nor one racing it. Every emit that returned nil
+// handed its item to Send, so the nil results equal the items Send was given.
+//
+// It is a regression guard: the race between an emit and the failing Send is hit only on some
+// runs, so before the fix it failed probabilistically, which is why the plan runs it with -count.
+func TestEmitNeverSucceedsAfterTheSendFailed(t *testing.T) {
+	ctx, cancel := context.WithCancel(testCtx(t))
+	defer cancel()
+	stream := &failingStream{failAt: 2, failed: make(chan struct{})}
+	const emitters, after = 16, 20
+	var accepted atomic.Int32
+	var late []error
+	runErr, sendErr := pump(ctx, cancel, &logger{w: &syncBuffer{}}, "test",
+		func(emit func(int) error) error {
+			var wg sync.WaitGroup
+			for e := range emitters {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for {
+						if emit(e) != nil {
+							return
+						}
+						accepted.Add(1)
+					}
+				}()
+			}
+			wg.Wait()
+			select {
+			case <-stream.failed:
+			default:
+				return errors.New("the emitters stopped before the send failed")
+			}
+			for item := range after {
+				late = append(late, emit(item))
+			}
+			return nil
+		},
+		stream.Send)
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	if sendErr == nil {
+		t.Fatal("the send error was not reported")
+	}
+	for i, err := range late {
+		if err == nil {
+			t.Errorf("emit %d after the failed send returned nil", i)
+		}
+	}
+	if got, sent := accepted.Load(), stream.sent.Load(); got != sent {
+		t.Errorf("%d emits returned nil but Send was given %d items: %d dropped items were reported as sent", got, sent, got-sent)
+	}
+}
+
+// TestPumpHoldsBackAnAuthorThatOutpacesSend: with a consumer that delivers item k only once the
+// author is already trying to emit item k+1, that emit has not returned while item k is being
+// delivered: one item is in flight, the rest wait in the author.
+func TestPumpHoldsBackAnAuthorThatOutpacesSend(t *testing.T) {
+	ctx, cancel := context.WithCancel(testCtx(t))
+	defer cancel()
+	const items = 50
+	attempting := make(chan int, items+1) // the author is about to emit this item (items+1: done)
+	var returned atomic.Int32
+	var delivered []int
+	runErr, sendErr := pump(ctx, cancel, &logger{w: &syncBuffer{}}, "test",
+		func(emit func(int) error) error {
+			for k := 1; k <= items; k++ {
+				attempting <- k
+				if err := emit(k); err != nil {
+					return err
+				}
+				returned.Add(1)
+			}
+			attempting <- items + 1
+			return nil
+		},
+		func(k int) error {
+			for next := range attempting {
+				if next == k+1 {
+					break
+				}
+			}
+			if n := returned.Load(); n > int32(k) {
+				t.Errorf("while item %d was being delivered %d emits had returned, want at most %d", k, n, k)
+			}
+			delivered = append(delivered, k)
+			return nil
+		})
+	if runErr != nil || sendErr != nil {
+		t.Fatalf("run %v, send %v", runErr, sendErr)
+	}
+	if len(delivered) != items {
+		t.Fatalf("delivered %d items, want %d", len(delivered), items)
+	}
+	for i, k := range delivered {
+		if k != i+1 {
+			t.Fatalf("delivered %v, want 1..%d in order", delivered, items)
 		}
 	}
 }

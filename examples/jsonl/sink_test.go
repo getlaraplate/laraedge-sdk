@@ -4,9 +4,13 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -376,5 +380,409 @@ func TestInstancesAreIndependent(t *testing.T) {
 	}
 	if o := s.Send(context.Background(), "unknown", batch("m1", 1)); o.Kind != sdk.OutcomeRejectInvalid {
 		t.Errorf("unconfigured instance = %+v", o)
+	}
+}
+
+// faultyFile is a real file whose next WriteAt, Sync, Truncate or Close calls fail on demand. A
+// failing WriteAt writes the first half of its data, as a write cut short does.
+type faultyFile struct {
+	*os.File
+	disk *faultyDisk
+}
+
+func (f faultyFile) WriteAt(p []byte, off int64) (int, error) {
+	if f.disk.failWrites > 0 {
+		f.disk.failWrites--
+		n, _ := f.File.WriteAt(p[:len(p)/2], off)
+		return n, errors.New("write failed")
+	}
+	return f.File.WriteAt(p, off)
+}
+
+func (f faultyFile) Close() error {
+	err := f.File.Close()
+	if f.disk.failCloses > 0 {
+		f.disk.failCloses--
+		return errors.New("close failed")
+	}
+	return err
+}
+
+func (f faultyFile) Sync() error {
+	if f.disk.failSyncs > 0 {
+		f.disk.failSyncs--
+		return errors.New("sync failed")
+	}
+	return f.File.Sync()
+}
+
+func (f faultyFile) Truncate(size int64) error {
+	if f.disk.failTruncates > 0 {
+		f.disk.failTruncates--
+		return errors.New("truncate failed")
+	}
+	return f.File.Truncate(size)
+}
+
+// faultyDisk opens faultyFiles; its counters say how many of the next calls fail. The sink calls
+// it under the lock of its target, and the tests send from one goroutine.
+type faultyDisk struct {
+	failWrites, failSyncs, failTruncates, failCloses int
+}
+
+func (d *faultyDisk) open(path string) (file, error) {
+	f, err := openFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return faultyFile{File: f.(*os.File), disk: d}, nil
+}
+
+func messageIDs(t *testing.T, path string) []string {
+	t.Helper()
+	var ids []string
+	for _, l := range lines(t, path) {
+		var head struct {
+			MessageID string `json:"message_id"`
+		}
+		if err := json.Unmarshal([]byte(l), &head); err != nil {
+			t.Fatalf("line %q is not JSON: %v", l, err)
+		}
+		ids = append(ids, head.MessageID)
+	}
+	return ids
+}
+
+func TestAFailedSyncAsksForARetryAndTheResendIsWrittenOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.jsonl")
+	s := configuredSink(t, path)
+	disk := &faultyDisk{}
+	s.open = disk.open
+	if o := send(s, batch("m0", 1, sampleRecord("d", 1))); o.Kind != sdk.OutcomeAccepted {
+		t.Fatalf("m0 = %+v", o)
+	}
+	disk.failSyncs = 1
+	o := send(s, batch("m1", 2, sampleRecord("d", 2)))
+	if o.Kind != sdk.OutcomeRetryAfter || o.RetryAfter != retryDelay {
+		t.Fatalf("send with a failing Sync = %+v, want RETRY_AFTER after %v", o, retryDelay)
+	}
+	if o := send(s, batch("m1", 2, sampleRecord("d", 2))); o.Kind != sdk.OutcomeAccepted {
+		t.Fatalf("resend = %+v, want ACCEPTED", o)
+	}
+	if got := messageIDs(t, path); !slices.Equal(got, []string{"m0", "m1"}) {
+		t.Errorf("file holds %q, want m0 and m1 once each", got)
+	}
+}
+
+func TestAFailedTruncationWritesNothingAndAsksForARetry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.jsonl")
+	s := configuredSink(t, path)
+	disk := &faultyDisk{}
+	s.open = disk.open
+	if o := send(s, batch("m0", 1, sampleRecord("d", 1))); o.Kind != sdk.OutcomeAccepted {
+		t.Fatalf("m0 = %+v", o)
+	}
+	disk.failSyncs = 1
+	if o := send(s, batch("m1", 2, sampleRecord("d", 2))); o.Kind != sdk.OutcomeRetryAfter {
+		t.Fatalf("send with a failing Sync = %+v, want RETRY_AFTER", o)
+	}
+	disk.failTruncates = 1
+	o := send(s, batch("m1", 2, sampleRecord("d", 2)))
+	if o.Kind != sdk.OutcomeRetryAfter || o.RetryAfter != retryDelay {
+		t.Fatalf("resend with a failing Truncate = %+v, want RETRY_AFTER after %v", o, retryDelay)
+	}
+	if got := messageIDs(t, path); !slices.Equal(got, []string{"m0", "m1"}) {
+		t.Errorf("after the failed truncation the file holds %q, want the unsynced m1 line only once", got)
+	}
+	if o := send(s, batch("m1", 2, sampleRecord("d", 2))); o.Kind != sdk.OutcomeAccepted {
+		t.Fatalf("resend = %+v, want ACCEPTED", o)
+	}
+	if got := messageIDs(t, path); !slices.Equal(got, []string{"m0", "m1"}) {
+		t.Errorf("file holds %q, want m0 and m1 once each", got)
+	}
+}
+
+func TestAPartialWriteAsksForARetryAndTheResendIsWrittenOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.jsonl")
+	s := configuredSink(t, path)
+	disk := &faultyDisk{}
+	s.open = disk.open
+	if o := send(s, batch("m0", 1, sampleRecord("d", 1))); o.Kind != sdk.OutcomeAccepted {
+		t.Fatalf("m0 = %+v", o)
+	}
+	disk.failWrites = 1
+	if o := send(s, batch("m1", 2, sampleRecord("d", 2))); o.Kind != sdk.OutcomeRetryAfter || o.RetryAfter != retryDelay {
+		t.Fatalf("send with a failing write = %+v, want RETRY_AFTER after %v", o, retryDelay)
+	}
+	if o := send(s, batch("m1", 2, sampleRecord("d", 2))); o.Kind != sdk.OutcomeAccepted {
+		t.Fatalf("resend = %+v, want ACCEPTED", o)
+	}
+	if got := messageIDs(t, path); !slices.Equal(got, []string{"m0", "m1"}) {
+		t.Errorf("file holds %q, want m0 and m1 once each, without the half line", got)
+	}
+}
+
+// TestAFailedCloseAfterTheSyncKeepsTheLine: once Sync succeeded the line is durable, so a Close
+// that fails afterwards does not make the batch look unstored, and its resend is not written again.
+func TestAFailedCloseAfterTheSyncKeepsTheLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.jsonl")
+	s := configuredSink(t, path)
+	disk := &faultyDisk{}
+	s.open = disk.open
+	disk.failCloses = 1
+	if o := send(s, batch("m1", 1, sampleRecord("d", 1))); o.Kind != sdk.OutcomeAccepted {
+		t.Fatalf("send with a failing Close after the Sync = %+v, want ACCEPTED", o)
+	}
+	if o := send(s, batch("m1", 1, sampleRecord("d", 1))); o.Kind != sdk.OutcomeDuplicate {
+		t.Fatalf("resend = %+v, want DUPLICATE", o)
+	}
+	if got := messageIDs(t, path); !slices.Equal(got, []string{"m1"}) {
+		t.Errorf("file holds %q, want m1 once", got)
+	}
+}
+
+// TestAFileReplacedBehindTheSinkIsReadAgain: a file rotated away, or rewritten smaller, by
+// someone else is not the file the sink knew. Its message ids are read again, and a truncation
+// owed to the old file never extends the new one.
+func TestAFileReplacedBehindTheSinkIsReadAgain(t *testing.T) {
+	t.Run("rotated", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "out.jsonl")
+		s := configuredSink(t, path)
+		if o := send(s, batch("m1", 1, sampleRecord("d", 1))); o.Kind != sdk.OutcomeAccepted {
+			t.Fatalf("m1 = %+v", o)
+		}
+		if err := os.Rename(path, path+".1"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(`{"message_id":"m5"}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if o := send(s, batch("m5", 5, sampleRecord("d", 5))); o.Kind != sdk.OutcomeDuplicate {
+			t.Errorf("m5, already in the new file = %+v, want DUPLICATE", o)
+		}
+		if o := send(s, batch("m2", 2, sampleRecord("d", 2))); o.Kind != sdk.OutcomeAccepted {
+			t.Fatalf("m2 = %+v", o)
+		}
+		if got := messageIDs(t, path); !slices.Equal(got, []string{"m5", "m2"}) {
+			t.Errorf("new file holds %q, want m5 then m2", got)
+		}
+	})
+	t.Run("rewritten smaller after a failed sync", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "out.jsonl")
+		s := configuredSink(t, path)
+		disk := &faultyDisk{}
+		s.open = disk.open
+		for i, id := range []string{"m0", "m1"} {
+			if o := send(s, batch(id, uint64(i+1), sampleRecord("d", 1))); o.Kind != sdk.OutcomeAccepted {
+				t.Fatalf("%s = %+v", id, o)
+			}
+		}
+		disk.failSyncs = 1
+		if o := send(s, batch("m2", 3, sampleRecord("d", 3))); o.Kind != sdk.OutcomeRetryAfter {
+			t.Fatalf("send with a failing Sync = %+v, want RETRY_AFTER", o)
+		}
+		if err := os.WriteFile(path, []byte(`{"message_id":"x"}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if o := send(s, batch("m2", 3, sampleRecord("d", 3))); o.Kind != sdk.OutcomeAccepted {
+			t.Fatalf("resend = %+v, want ACCEPTED", o)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.ContainsRune(string(raw), 0) {
+			t.Errorf("the file was extended with NUL bytes: %q", raw)
+		}
+		if got := messageIDs(t, path); !slices.Equal(got, []string{"x", "m2"}) {
+			t.Errorf("file holds %q, want x then m2", got)
+		}
+	})
+	t.Run("rewritten smaller after a failed first sync", func(t *testing.T) {
+		// No append of this sink was durable yet: the file it found is still the one it knows.
+		path := filepath.Join(t.TempDir(), "out.jsonl")
+		if err := os.WriteFile(path, []byte(`{"message_id":"m0"}`+"\n"+`{"message_id":"m1"}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s := configuredSink(t, path)
+		disk := &faultyDisk{failSyncs: 1}
+		s.open = disk.open
+		if o := send(s, batch("m2", 3, sampleRecord("d", 3))); o.Kind != sdk.OutcomeRetryAfter {
+			t.Fatalf("send with a failing Sync = %+v, want RETRY_AFTER", o)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(`{"message_id":"x"}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if o := send(s, batch("m2", 3, sampleRecord("d", 3))); o.Kind != sdk.OutcomeAccepted {
+			t.Fatalf("resend = %+v, want ACCEPTED", o)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.ContainsRune(string(raw), 0) {
+			t.Errorf("the file was extended with NUL bytes: %q", raw)
+		}
+		if got := messageIDs(t, path); !slices.Equal(got, []string{"x", "m2"}) {
+			t.Errorf("file holds %q, want x then m2", got)
+		}
+	})
+}
+
+// TestReadingAFileDoesNotHoldTheSink: while the message ids of one file are read at its first
+// Configure, the other instances keep sending.
+func TestReadingAFileDoesNotHoldTheSink(t *testing.T) {
+	dir := t.TempDir()
+	s := configuredSink(t, filepath.Join(dir, "a.jsonl"))
+	reading := make(chan struct{})
+	release := make(chan struct{})
+	s.readIDs = func(path string) (map[string]bool, error) {
+		close(reading)
+		<-release
+		return readMessageIDs(path)
+	}
+	configured := make(chan []sdk.ConfigError)
+	go func() {
+		configured <- s.Configure(context.Background(), "i2", configSection(filepath.Join(dir, "b.jsonl")))
+	}()
+	<-reading
+	sent := make(chan sdk.Outcome)
+	go func() { sent <- send(s, batch("m1", 1, sampleRecord("d", 1))) }()
+	select {
+	case o := <-sent:
+		if o.Kind != sdk.OutcomeAccepted {
+			t.Errorf("send while another file is read = %+v, want ACCEPTED", o)
+		}
+	case errs := <-configured:
+		t.Fatalf("Configure returned %v before its read was released", errs)
+	case <-time.After(10 * time.Second):
+		close(release)
+		<-configured
+		<-sent
+		t.Fatal("a send waited for the read of another file")
+	}
+	close(release)
+	if errs := <-configured; len(errs) > 0 {
+		t.Fatal(errs)
+	}
+}
+
+func TestTheParentDirectoryIsSyncedBeforeTheFirstLine(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.jsonl")
+	s := configuredSink(t, path)
+	var synced []string
+	fail := true
+	s.syncDir = func(d string) error {
+		synced = append(synced, d)
+		if fail {
+			fail = false
+			return errors.New("directory sync failed")
+		}
+		return nil
+	}
+	o := send(s, batch("m1", 1, sampleRecord("d", 1)))
+	if o.Kind != sdk.OutcomeRetryAfter || o.RetryAfter != retryDelay {
+		t.Fatalf("send with a failing directory sync = %+v, want RETRY_AFTER after %v", o, retryDelay)
+	}
+	if got := lines(t, path); len(got) != 0 {
+		t.Fatalf("a send whose directory sync failed wrote %q", got)
+	}
+	for i, id := range []string{"m1", "m2"} {
+		if o := send(s, batch(id, uint64(i+1), sampleRecord("d", 1))); o.Kind != sdk.OutcomeAccepted {
+			t.Fatalf("%s = %+v", id, o)
+		}
+	}
+	if !slices.Equal(synced, []string{dir, dir}) {
+		t.Errorf("directories synced = %q, want %q twice (the failed attempt and its retry), then never again", synced, dir)
+	}
+}
+
+func TestDefaultDirectorySyncSucceeds(t *testing.T) {
+	if err := syncDir(t.TempDir()); err != nil {
+		t.Fatalf("syncDir: %v", err)
+	}
+}
+
+func TestBadQualityAndDeathAreWords(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.jsonl")
+	s := configuredSink(t, path)
+	bad := sdk.Record{Sample: &sdk.Sample{Device: "d", Signal: "s", TS: t0, Value: sdk.IntValue(1), Quality: sdk.QualityBad, Priority: sdk.PriorityBulk}}
+	death := sdk.Record{Event: &sdk.DeviceEvent{Kind: sdk.EventDeath, Device: "d", TS: t0}}
+	if o := send(s, batch("m1", 1, bad, death)); o.Kind != sdk.OutcomeAccepted {
+		t.Fatalf("outcome = %+v", o)
+	}
+	var line struct {
+		Records []struct {
+			Sample *struct {
+				Quality  string `json:"quality"`
+				Priority string `json:"priority"`
+			} `json:"sample"`
+			Event *struct {
+				Kind string `json:"kind"`
+			} `json:"event"`
+		} `json:"records"`
+	}
+	if err := json.Unmarshal([]byte(lines(t, path)[0]), &line); err != nil {
+		t.Fatal(err)
+	}
+	if got := line.Records[0].Sample; got == nil || got.Quality != "bad" || got.Priority != "bulk" {
+		t.Errorf("sample = %+v, want quality bad and priority bulk", got)
+	}
+	if got := line.Records[1].Event; got == nil || got.Kind != "death" {
+		t.Errorf("event = %+v, want kind death", got)
+	}
+}
+
+func TestInstancesSharingAFileKeepEveryAcceptedLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.jsonl")
+	s := newSink()
+	for _, id := range []string{"a", "b"} {
+		if errs := s.Configure(context.Background(), id, configSection(path)); len(errs) > 0 {
+			t.Fatal(errs)
+		}
+	}
+	const perSender = 50
+	var (
+		mu       sync.Mutex
+		accepted []string
+		wg       sync.WaitGroup
+	)
+	for _, instance := range []string{"a", "b"} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for n := range perSender {
+				id := fmt.Sprintf("%s-%d", instance, n)
+				if o := s.Send(context.Background(), instance, batch(id, uint64(n+1), sampleRecord("d", 1))); o.Kind == sdk.OutcomeAccepted {
+					mu.Lock()
+					accepted = append(accepted, id)
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() { // reconfigures an instance while its sends run
+		defer wg.Done()
+		for range perSender {
+			if errs := s.Configure(context.Background(), "a", configSection(path)); len(errs) > 0 {
+				t.Error(errs)
+				return
+			}
+		}
+	}()
+	wg.Wait()
+	if len(accepted) != 2*perSender {
+		t.Fatalf("%d sends accepted, want %d", len(accepted), 2*perSender)
+	}
+	got := messageIDs(t, path)
+	slices.Sort(got)
+	slices.Sort(accepted)
+	if !slices.Equal(got, accepted) {
+		t.Errorf("file holds %d lines, want each of the %d accepted ids exactly once", len(got), len(accepted))
 	}
 }

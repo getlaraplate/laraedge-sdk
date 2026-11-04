@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/getlaraplate/laraedge-sdk/manifest"
@@ -152,27 +153,47 @@ func enumOutOfRangeRecords() map[string]*pb.Record {
 	}
 }
 
+// enumCaseFields names the field an enumOutOfRangeRecords case breaks, as the refusal names it:
+// the enum's field, and for a data type the signal it belongs to.
+func enumCaseFields(t *testing.T, name string) []string {
+	t.Helper()
+	var fields []string
+	for _, f := range []string{"quality", "priority", "event kind", "data type"} {
+		if strings.HasPrefix(name, f) {
+			fields = append(fields, f)
+		}
+	}
+	if len(fields) == 0 {
+		t.Fatalf("%s: no field named by the case", name)
+	}
+	if strings.HasPrefix(name, "data type") {
+		fields = append(fields, "signals[0]")
+	}
+	return fields
+}
+
 func TestProcessorRefusesBadStreams(t *testing.T) {
-	cases := []struct {
+	type streamCase struct {
 		name     string
 		messages []*pb.ProcessorIn
 		want     codes.Code
-	}{
-		{"first message is a record", []*pb.ProcessorIn{recordMsg(sampleRecord("d", 1))}, codes.InvalidArgument},
-		{"empty first message", []*pb.ProcessorIn{{}}, codes.InvalidArgument},
-		{"start without instance", []*pb.ProcessorIn{startMsg("")}, codes.InvalidArgument},
-		{"unconfigured instance", []*pb.ProcessorIn{startMsg("nobody")}, codes.FailedPrecondition},
-		{"second start", []*pb.ProcessorIn{startMsg("a"), startMsg("a")}, codes.InvalidArgument},
-		{"record without item", []*pb.ProcessorIn{startMsg("a"), recordMsg(&pb.Record{})}, codes.InvalidArgument},
-		{"sample without value", []*pb.ProcessorIn{startMsg("a"), recordMsg(&pb.Record{Item: &pb.Record_Sample{Sample: &pb.Sample{Device: "d"}}})}, codes.InvalidArgument},
-		{"message without start or record", []*pb.ProcessorIn{startMsg("a"), {}}, codes.InvalidArgument},
+		// fields must all be named by the refusal's message.
+		fields []string
+	}
+	cases := []streamCase{
+		{"first message is a record", []*pb.ProcessorIn{recordMsg(sampleRecord("d", 1))}, codes.InvalidArgument, nil},
+		{"empty first message", []*pb.ProcessorIn{{}}, codes.InvalidArgument, nil},
+		{"start without instance", []*pb.ProcessorIn{startMsg("")}, codes.InvalidArgument, nil},
+		{"unconfigured instance", []*pb.ProcessorIn{startMsg("nobody")}, codes.FailedPrecondition, nil},
+		{"second start", []*pb.ProcessorIn{startMsg("a"), startMsg("a")}, codes.InvalidArgument, nil},
+		{"record without item", []*pb.ProcessorIn{startMsg("a"), recordMsg(&pb.Record{})}, codes.InvalidArgument, nil},
+		{"sample without value", []*pb.ProcessorIn{startMsg("a"), recordMsg(&pb.Record{Item: &pb.Record_Sample{Sample: &pb.Sample{Device: "d"}}})}, codes.InvalidArgument, nil},
+		{"message without start or record", []*pb.ProcessorIn{startMsg("a"), {}}, codes.InvalidArgument, nil},
 	}
 	for name, r := range enumOutOfRangeRecords() {
-		cases = append(cases, struct {
-			name     string
-			messages []*pb.ProcessorIn
-			want     codes.Code
-		}{"record with " + name, []*pb.ProcessorIn{startMsg("a"), recordMsg(r)}, codes.InvalidArgument})
+		cases = append(cases, streamCase{
+			"record with " + name, []*pb.ProcessorIn{startMsg("a"), recordMsg(r)}, codes.InvalidArgument, enumCaseFields(t, name),
+		})
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -196,6 +217,11 @@ func TestProcessorRefusesBadStreams(t *testing.T) {
 			}
 			_, err = stream.Recv()
 			wantCode(t, err, tc.want)
+			for _, f := range tc.fields {
+				if msg := status.Convert(err).Message(); !strings.Contains(msg, f) {
+					t.Errorf("message %q does not name %q", msg, f)
+				}
+			}
 			if n := records.Load(); n != 0 {
 				t.Errorf("the plugin received %d records from a bad stream", n)
 			}

@@ -101,6 +101,24 @@ func TestLaunchRefusesAnUnsafeSocketDirectory(t *testing.T) {
 			},
 		},
 		{
+			// The root directory belongs to root: an unprivileged run needs no other account to
+			// meet a directory of another user. Run as root, the case skips; the manual check is
+			// then a directory chowned to another user (install -d -o nobody -m 0700 <dir>)
+			// passed as SocketDir by a root host, which must refuse it with this message.
+			name: "directory of another user",
+			want: "does not belong to the current user",
+			prepare: func(t *testing.T, _ string) string {
+				info, err := os.Lstat("/")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if stat, ok := info.Sys().(*syscall.Stat_t); !ok || int(stat.Uid) == os.Getuid() {
+					t.Skip("the root directory belongs to the current user")
+				}
+				return "/"
+			},
+		},
+		{
 			name: "regular file",
 			want: "not a directory",
 			prepare: func(t *testing.T, base string) string {

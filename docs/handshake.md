@@ -79,10 +79,11 @@ The Go SDK uses exit code 2 when the command line cannot be parsed and exit code
 - The plugin listens on a named pipe `\\.\pipe\laraedge-<pid>-<8 random lowercase hex digits>`, where `<pid>` is the
   plugin's process id. No socket directory is involved.
 - The pipe has a protected DACL with exactly one entry that allows full access to the user of the plugin process: the
-  security descriptor `D:P(A;;GA;;;<SID of the current user>)`. The Go SDK creates it with go-winio. The pipe is a byte-mode pipe that the plugin reads and writes (duplex)
-  and that rejects remote clients (`FILE_PIPE_REJECT_REMOTE_CLIENTS`), which is how go-winio creates it. The conformance
-  check `permissions` reads the descriptor and fails when the DACL is not protected, has more than one entry, is not an
-  allow entry, names another SID or does not grant full access.
+  security descriptor `D:P(A;;GA;;;<SID of the current user>)`. The Go SDK creates it with go-winio. The pipe is a
+  byte-mode pipe that the plugin reads and writes (duplex) and that rejects remote clients
+  (`FILE_PIPE_REJECT_REMOTE_CLIENTS`), which is how go-winio creates it. The conformance check `permissions` reads the
+  descriptor and fails when the DACL is not protected, has more than one entry, is not an allow entry, names another SID
+  or does not grant full access.
 
 ## The handshake line
 
@@ -140,6 +141,13 @@ the configuration there: configuration errors name a path and never a value.
 All services are on the one connection. `Plugin` and `grpc.health.v1.Health` are served by every plugin; `Input`,
 `Processor` and `Output` only by a plugin that offers that kind in its `plugin.json`.
 
+Two shapes of the protocol look like duplication and are deliberate. `ConfigureRequest` and `ConfigureResponse` are one
+pair of messages shared by the three kinds: the request is an instance identifier and the JSON of its section, the
+response the list of refusals, and the kind is the service the call is made on. The message `Health` of `input.proto`
+(`laraplate.edge.plugin.v1.Health`, the connection state inside an `InputEvent`) is not the `grpc.health.v1.Health`
+service: the packages differ and the two never meet on the wire. Both belong to `laraplate.edge.plugin.v1`, and renaming
+or splitting them would break plugins already built, so they stay.
+
 | Service | RPC | Deadline | Notes |
 |---|---|---|---|
 | `Plugin` | `Info` | 5 s | Identity and manifest. |
@@ -163,7 +171,13 @@ concurrently: for example `Probe` while a `Subscribe` stream of the same instanc
 instance while another streams. The conformance suite configures every fixture on its own instance
 (`conformance-<kind>-valid-<n>` and `conformance-<kind>-invalid-<n>`, which is not the `id` of the section), so a
 plugin must tolerate many configured instances at once. The Go SDK does not serialise `Send`, `Probe` and `Browse`
-against a new `Configure` of the same instance.
+against a new `Configure` of the same instance: a `Send` or `Probe` already running when the host re-configures the
+instance keeps running while the author's `Configure` does. Making them safe together is the plugin author's
+responsibility. The SDK does not hold a lock around them because it cannot know which state they share: one lock
+per instance would make a `Configure` (10 s deadline) wait behind a slow `Send` (30 s) and every call wait behind a
+`Configure`, while the author can guard exactly what is shared, for example by building the new configuration aside
+and swapping it in atomically once `Configure` accepts it. Streams are different: a new `Configure` cancels the
+running `Subscribe` or `Process` stream and waits for it to end before calling the author.
 
 ### Configure
 
@@ -176,7 +190,8 @@ against a new `Configure` of the same instance.
 - Output: `id` and `config` (free object).
 
 A non-empty `ConfigureResponse.errors` means the configuration is refused; each entry is a `path` such as
-`devices[0].points[1].address` and a `message`, and never contains a value, because values can be secrets. A refusal
+`devices[0].points[1].address` (a key that is empty or contains `.`, `[`, `]`, a quote or whitespace, such as `a.b`,
+is written as `config["a.b"]`) and a `message`, and never contains a value, because values can be secrets. A refusal
 is an answer, not an RPC error: an RPC error from `Configure` is a failure of the plugin. Go plugins decode the
 section with `sdk.DecodeInput`, `sdk.DecodeProcessor` and `sdk.DecodeOutput`, which ignore the keys they do not know
 so that a newer agent can add some; do likewise.
@@ -185,12 +200,13 @@ so that a newer agent can add some; do likewise.
 
 `Subscribe` sends `InputEvent`s of three kinds: `sample`, `answered(device)` (the device answered, also when it had no
 new samples) and `health(connected, read_error)`, where `read_error` is empty or one of `timeout`, `connection`,
-`exception`, `decode`. When the stream is cancelled (or the plugin is shutting down) the handler returns normally, with status OK and not
-with an error; an error from `Run` ends the stream with that error. A plugin never sends births or deaths: the agent
-derives them. A sample carries the device and
-signal keys, a UTC timestamp, exactly one value (`double`, `int`, `bool` or `string`; NaN and infinities are refused),
-a quality (`GOOD`, `UNCERTAIN`, `BAD`) and a priority (`CRITICAL`, `BULK`). The `UNSPECIFIED` enum values are never
-valid on the wire.
+`exception`, `decode`. When the stream is cancelled (or the plugin is shutting down) the handler returns normally, with
+status OK and not with an error. An error returned by the author's `Run` ends the stream with that error as its
+status: the status the error already carries, `CANCELED` or `DEADLINE_EXCEEDED` for a context error while the stream
+is still live, and `UNKNOWN` with the error text for any other error. A plugin never sends births or deaths: the agent
+derives them. A sample carries the device and signal keys, a UTC timestamp, exactly one value (`double`, `int`, `bool`
+or `string`; NaN and infinities are refused), a quality (`GOOD`, `UNCERTAIN`, `BAD`) and a priority (`CRITICAL`,
+`BULK`). The `UNSPECIFIED` enum values are never valid on the wire.
 
 ### Processor stream
 
@@ -202,12 +218,12 @@ not a `start`, or a later one is not a `record` (or is an invalid record).
 
 ### Output outcomes
 
-`Send` answers exactly one of: `ACCEPTED`, `DUPLICATE` (stored earlier; the agent advances), `RETRY_AFTER` (with
-`retry_after`; the agent backs off), `SPLIT` (batch too large; the agent splits it in two), `REJECT_INVALID` (with
-`reason`; the agent drops the batch and records a loss) and `SUSPEND_AUTH` (credentials refused; the agent suspends
-sending and keeps buffering). `OUTCOME_UNSPECIFIED` is never valid. The message identifier of a batch (`message_id`, a
-UUIDv7) is the key of idempotency: sending the same identifier twice must give `ACCEPTED` or `DUPLICATE` both times. A
-plugin output never buffers; the agent does.
+`Send` answers exactly one of: `ACCEPTED`, `DUPLICATE` (stored earlier; the agent advances), `RETRY_AFTER`
+(optionally with `retry_after`; without it the agent uses its own backoff), `SPLIT` (batch too large; the agent splits
+it in two), `REJECT_INVALID` (with `reason`; the agent drops the batch and records a loss) and `SUSPEND_AUTH`
+(credentials refused; the agent suspends sending and keeps buffering). `OUTCOME_UNSPECIFIED` is never valid. The
+message identifier of a batch (`message_id`, a UUIDv7) is the key of idempotency: sending the same identifier twice
+must give `ACCEPTED` or `DUPLICATE` both times. A plugin output never buffers; the agent does.
 
 ### One stream per instance
 
@@ -215,9 +231,9 @@ An input instance has at most one `Subscribe` stream, and a processor instance a
 is open, a second one for the same instance is refused with the gRPC status `ALREADY_EXISTS`. A plugin that wants
 parallel streams needs separate instances. A stream whose client has already cancelled it when the plugin starts
 serving it is refused with that cancellation (`CANCELLED` or `DEADLINE_EXCEEDED`) and never holds the instance, so
-a host that closes a stream and opens a new one is not refused by its own old stream. The conformance check `input.stream` verifies the rule for inputs and
-that a new stream is served once the first was cancelled, which proves that the first one ended; the `Process` rule
-is written in `processor.proto` and is not probed by the suite.
+a host that closes a stream and opens a new one is not refused by its own old stream. The conformance check
+`input.stream` verifies the rule for inputs and that a new stream is served once the first was cancelled, which
+proves that the first one ended; the check `processor.signals` verifies the rule for processors.
 
 ### Behaviour of the Go SDK
 
@@ -227,8 +243,8 @@ Not part of the wire contract, but what a host can observe from a Go plugin:
   last `Configure` was refused; an empty `instance_id` gets `INVALID_ARGUMENT`.
 - A new `Configure` of an instance cancels its running stream first; a refused `Configure` leaves the instance
   unconfigured.
-- A panic in the author's code fails that one call with `INTERNAL`, writes one line to stderr (the type of the panic and,
-  for a Go runtime error such as an index out of range, the text of that error; never request data) and the plugin
+- A panic in the author's code fails that one call with `INTERNAL`, writes one line to stderr (the type of the panic
+  and, for a Go runtime error such as an index out of range, the text of that error; never request data) and the plugin
   keeps serving.
 - Messages are limited to 16 MB in both directions.
 
@@ -255,9 +271,10 @@ The conformance check `info` makes these comparisons and also requires that the 
   UTF-16 code units) and does not normalise numbers.
 - No whitespace outside strings.
 - Numbers exactly as written (`1.0` stays `1.0`, `1e2` stays `1e2`).
-- Strings in UTF-8 with only the escapes JSON requires: `\"`, `\\`, `\b`, `\f`, `\n`, `\r`, `\t` and `\u00xx` (lower-case
-  hexadecimal) for the other characters below U+0020. Every other character, `/` and U+007F included, is written
-  as itself, and an escape such as `\u00e9` in the input is decoded and written as the character itself (a literal e with acute accent).
+- Strings in UTF-8 with only the escapes JSON requires: `\"`, `\\`, `\b`, `\f`, `\n`, `\r`, `\t` and `\u00xx`
+  (lower-case hexadecimal) for the other characters below U+0020. Every other character, `/` and U+007F included, is
+  written as itself, and an escape such as `\u00e9` in the input is decoded and written as the character itself (a
+  literal e with acute accent).
 
 ### `--manifest`
 
@@ -395,7 +412,7 @@ platform files):
 | Platform | Mechanism | Plugin's descendants |
 |---|---|---|
 | Linux | The plugin leads its own process group and gets `SIGKILL` when the host dies (parent-death signal). | `Kill` and the plugin's own exit end the whole group while the host lives. When the host dies suddenly only the plugin is killed: the processes it started survive, and the agent's systemd unit (`KillMode=control-group`) is the backstop. A descendant that leaves the group (`setsid`, `setpgid`) is not reached by the group kill. |
-| Windows | The plugin runs in a job object that kills on close. | When the host dies or the plugin has been reaped the whole job is killed. The plugin joins the job right after it starts: a child started before that moment stays outside it. |
+| Windows | The plugin runs in a job object that kills on close. | When the host dies or the plugin has been reaped the whole job is killed. The plugin starts suspended and runs only once it is in the job, so every child it starts is in the job too. |
 | Other Unix | The plugin leads its own process group. | No parent-death guarantee: a plugin can outlive a host that dies. Development only. |
 
 For an author this means: do not daemonize or detach, keep child processes inside the plugin's process group, and
@@ -426,8 +443,8 @@ What each check requires, in report order:
 | `<kind>.configure` | Every section is configured on its own instance, within 10 s. Every valid section is accepted (no errors in the response and no RPC error). Every invalid section is answered with at least one configuration error (an RPC error fails the check). The checks that follow need the first valid section to be accepted. |
 | `input.stream` | `Subscribe` on the first valid instance delivers an event (of any kind) within the timeout. While it is open, a second `Subscribe` of the same instance must be refused with an error (the protocol says `ALREADY_EXISTS`, and the suite reports the code it saw; a second stream that is served, or that ends OK without an event, fails). After the first stream is cancelled, a new `Subscribe` of the instance is served with an event within the timeout (retried every 50 ms), which proves that the first one ended. |
 | `input.probe` | `Probe` answers within 30 s with exactly one sample for each `(device, signal)` point of the first valid section, and no sample for any other pair. |
-| `processor.signals` | The first valid section must observe at least one device and declare at least one signal. The suite opens one `Process` stream, sends `start`, the records and then closes its side; the processor must emit at least one sample before the timeout, every sample must be of a declared `(device, signal)` pair, and the stream must not fail or end before the records were sent. The processor should end its stream when the agent closes its side. |
-| `output.send` | `Send` of one valid batch (one sample record, `source_seq` 1, a UUIDv7 `message_id`) answers within 30 s with one of the six outcomes. Which one is not judged. |
-| `output.duplicate` | The same batch sent twice (same `message_id`) is answered `ACCEPTED` or `DUPLICATE` both times. Not run when the first `Send` returned an error. |
+| `processor.signals` | The first valid section must observe at least one device and declare at least one signal. The suite opens one `Process` stream, sends `start`, the records and then closes its side; the processor must emit at least one sample before the timeout, every sample must be of a declared `(device, signal)` pair, and the stream must not fail or end before the records were sent, and the records must be taken within the timeout (a processor that stops reading its input fails). While the first stream is open, after its first sample (at most half the timeout is waited for one), a second `Process` stream of the same instance must be refused with `ALREADY_EXISTS`; one that is served, or not refused within half the timeout, or refused with another code fails. When the processor ended its stream on its own before the suite closed its side, the second stream is not probed, and the detail says so. A second stream that is served while the first one ends is told apart by a third stream opened while the second is open: refused with `ALREADY_EXISTS`, the first stream ended on its own; served in place of the second (the second stream ends), the processor replaces its running stream with the newest one, which fails, as does a third stream refused with another code. A sample on the second stream is not its end. The processor should end its stream when the agent closes its side. |
+| `output.send` | `Send` of one valid batch (one sample record, `source_seq` 1, a UUIDv7 `message_id`) answers within 30 s with one of the six outcomes. Which one is not judged, but `REJECT_INVALID` must carry a non-empty `reason`, as the outcomes above require; `RETRY_AFTER` may come without `retry_after`. |
+| `output.duplicate` | The same batch sent twice (same `message_id`) is answered `ACCEPTED` or `DUPLICATE` both times. Not run when the first `Send` returned an error or broke the rule above. |
 | `shutdown` | A health `Check` still answers; then `Shutdown` with a 5 s deadline (an `UNAVAILABLE` answer or EOF counts as an answer) and the plugin exits with code 0 within 5 s plus 1 s. |
 | `restart` | After a `kill -9`, a new launch with the same socket directory performs a new handshake on a different address; on Unix the old socket file is gone afterwards, removed by the host as a leftover `*.sock` file. |

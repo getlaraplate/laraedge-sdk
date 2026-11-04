@@ -10,6 +10,8 @@
 //	HELPER_AFTER_STDERR  a line printed on stderr after the handshake
 //	HELPER_ECHO_ENV=1    after the handshake print env=<KEY> on stdout for every variable
 //	HELPER_CHILD=1       after the handshake start a blocked child of this helper, print child=<pid>
+//	HELPER_CHILD_FIRST=1 start a blocked child of this helper as the first action, print child=<pid>
+//	HELPER_LINES=<n>     after the handshake print n numbered lines, line=1 to line=<n>, on stdout
 //	HELPER_HOLD_OUTPUT=1 after the handshake start a child outside the helper's process group
 //	                     (Unix) that shares its stdout and floods it, print child=<pid>
 //	HELPER_FLOOD=1       write lines on stdout until stdout breaks (the HELPER_HOLD_OUTPUT child)
@@ -25,6 +27,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,6 +44,9 @@ func main() {
 	}
 	if os.Getenv("HELPER_FLOOD") == "1" {
 		flood()
+	}
+	if os.Getenv("HELPER_CHILD_FIRST") == "1" {
+		startChild()
 	}
 	if os.Getenv("HELPER_CRASH") == "1" {
 		for i := 1; i <= 30; i++ {
@@ -75,6 +81,16 @@ func main() {
 	}
 	if text := os.Getenv("HELPER_AFTER_STDERR"); text != "" {
 		fmt.Fprintln(os.Stderr, text)
+	}
+	if value := os.Getenv("HELPER_LINES"); value != "" {
+		count, err := strconv.Atoi(value)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		for i := 1; i <= count; i++ {
+			fmt.Printf("line=%d\n", i)
+		}
 	}
 	if os.Getenv("HELPER_ECHO_ENV") == "1" {
 		for _, entry := range os.Environ() {

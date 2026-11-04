@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -428,8 +429,9 @@ func (s *suite) checkInputProbe(sess *session, instance string) {
 }
 
 // checkProcessorSignals feeds the processor the records of the first valid fixture, or synthetic
-// records when it has none (see syntheticRecords), ends its side of the stream and collects the
-// samples until the stream ends or the timeout passes. The suite opens one Process stream only.
+// records when it has none (see syntheticRecords). While that stream is open it probes a second
+// stream of the instance, which must be refused with ALREADY_EXISTS. Then it ends its side of the
+// first stream and collects the samples until the stream ends or the timeout passes.
 func (s *suite) checkProcessorSignals(sess *session, instance string) {
 	const name = "processor.signals"
 	cfg, err := sdk.DecodeProcessor(s.fixtures.Processor.Valid[0])
@@ -467,8 +469,16 @@ func (s *suite) checkProcessorSignals(sess *session, instance string) {
 		source = "the records of conformance.json"
 	}
 
-	ctx, cancel := context.WithTimeout(s.ctx, s.timeout)
+	// The sends are bounded by the timeout; the timeout of the samples starts again when the
+	// suite ends its side of the stream, so neither the sends nor the second-stream probe shorten
+	// it.
+	ctx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
+	var expired atomic.Bool
+	expire := func() {
+		expired.Store(true)
+		cancel()
+	}
 	stream, err := pb.NewProcessorClient(sess.conn).Process(ctx)
 	if err != nil {
 		s.fail(name, "Process: %v", err)
@@ -479,6 +489,8 @@ func (s *suite) checkProcessorSignals(sess *session, instance string) {
 		err     error
 	}
 	collected := make(chan result, 1)
+	firstSample := make(chan struct{})
+	ended := make(chan struct{})
 	go func() {
 		var r result
 		for {
@@ -487,15 +499,46 @@ func (s *suite) checkProcessorSignals(sess *session, instance string) {
 				if !errors.Is(err, io.EOF) {
 					r.err = err
 				}
+				close(ended)
 				collected <- r
 				return
+			}
+			if len(r.samples) == 0 {
+				close(firstSample)
 			}
 			r.samples = append(r.samples, out.GetSample())
 		}
 	}()
 
+	sending := time.AfterFunc(s.timeout, expire)
 	sendErr := sendRecords(stream, instance, records)
+	if !sending.Stop() {
+		sendErr = fmt.Errorf("the records were not taken within %v; the processor must keep reading its input", s.timeout)
+	}
+	// The first stream is still open: its sample proves the plugin serves it, so a second stream of
+	// the instance must now be refused. A processor that answers only at the end of its input
+	// gets half the timeout, then the second stream is tried anyway. A processor that ended the
+	// stream on its own has no open stream left to probe against.
+	wait := time.NewTimer(s.timeout / 2)
+	select {
+	case <-firstSample:
+	case <-ended:
+	case <-wait.C:
+	case <-s.ctx.Done():
+	}
+	wait.Stop()
+	secondErr, probed := s.refusedSecondProcess(sess, instance, ended)
+	if sendErr == nil {
+		sendErr = stream.CloseSend()
+	}
+	if !expired.Load() {
+		deadline := time.AfterFunc(s.timeout, expire)
+		defer deadline.Stop()
+	}
 	r := <-collected
+	if expired.Load() && r.err != nil {
+		r.err = status.Error(codes.DeadlineExceeded, r.err.Error())
+	}
 	var problems []string
 	for _, sample := range r.samples {
 		key := [2]string{sample.GetDevice(), sample.GetSignal()}
@@ -523,12 +566,141 @@ func (s *suite) checkProcessorSignals(sess *session, instance string) {
 		s.fail(name, "the stream ended without a sample for %s, %s", source, nothing)
 	case len(r.samples) == 0:
 		s.fail(name, "no sample within %v for %s, %s", s.timeout, source, nothing)
+	case secondErr != "":
+		s.fail(name, "%s", secondErr)
+	case !probed:
+		s.pass(name, "%d samples, all of declared signals, for %s; the second-stream rule was not probed: the "+
+			"processor ended its stream before the suite closed its side", len(r.samples), source)
 	default:
 		s.pass(name, "%d samples, all of declared signals, for %s", len(r.samples), source)
 	}
 }
 
-// sendRecords starts the stream on the instance, sends the records and ends its side.
+// endedGrace is how long the probe waits to see the first stream ended once a second stream was
+// not refused. The plugin may end the first stream on its own just before it serves the second
+// one, and both travel on one connection, so such an end is already on its way when the second
+// answer arrives. An end seen within the grace is told apart from a newest-wins processor, which
+// ends the first stream because of the second, by one more stream (see refusedSecondProcess).
+const endedGrace = 250 * time.Millisecond
+
+// refusedSecondProcess opens a second Process stream of the instance while the first one is
+// open and returns what is wrong with its answer, empty when it was refused with ALREADY_EXISTS.
+// ended is closed when the first stream ended. probed is false only when the first stream had
+// ended on its own: already when the probe started, or before a second stream that the plugin then
+// rightly served, which a third stream refused while the second is open proves. A second stream
+// served while the first ends, followed by a third stream that is not refused, is a processor
+// that replaces its running stream with the newest one: that breaks the rule.
+func (s *suite) refusedSecondProcess(sess *session, instance string, ended <-chan struct{}) (problem string, probed bool) {
+	select {
+	case <-ended:
+		return "", false
+	default:
+	}
+	ctx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
+	const rule = "the protocol allows one Process stream per processor instance and refuses another with ALREADY_EXISTS"
+	second := probeProcess(ctx, sess, instance)
+	err, answered := s.awaitProbe(second)
+	code := status.Code(err)
+	if answered && code == codes.AlreadyExists {
+		return "", true
+	}
+	if s.ctx.Err() != nil {
+		return fmt.Sprintf("the run was interrupted while a second Process stream was probed: %v", s.ctx.Err()), true
+	}
+	firstEnded := false
+	grace := time.NewTimer(endedGrace)
+	defer grace.Stop()
+	select {
+	case <-ended:
+		firstEnded = true
+	case <-grace.C:
+	}
+	switch {
+	case firstEnded && answered && err != nil:
+		// The second stream is gone, so no third one can tell why the first ended; a stream refused
+		// with another code was not served next to the first one.
+		return "", false
+	case firstEnded:
+		// The second stream was served and is still open. A processor that ended the first stream
+		// on its own refuses a third one; a newest-wins processor serves it in place of the second.
+		third := probeProcess(ctx, sess, instance)
+		var thirdErr error
+		thirdAnswered, replaced := false, false
+		if !answered {
+			wait := time.NewTimer(s.timeout / 2)
+			running, timedOut := second, false
+			for !thirdAnswered && !replaced && !timedOut {
+				select {
+				case thirdErr = <-third:
+					thirdAnswered = true
+				case secondErr := <-running:
+					// A sample on the second stream is not its end; an error or EOF is: it was replaced.
+					// After a sample the probe has nothing more to read there (a nil channel never fires).
+					replaced = secondErr != nil
+					running = nil
+				case <-wait.C:
+					timedOut = true
+				}
+			}
+			wait.Stop()
+		} else {
+			thirdErr, thirdAnswered = s.awaitProbe(third)
+		}
+		thirdCode := status.Code(thirdErr)
+		if thirdAnswered && thirdCode == codes.AlreadyExists {
+			return "", false
+		}
+		if s.ctx.Err() != nil {
+			return fmt.Sprintf("the run was interrupted while a second Process stream was probed: %v", s.ctx.Err()), true
+		}
+		const served = "a second Process stream of the instance was served while the first was open and the first then ended; "
+		if thirdAnswered && thirdErr != nil {
+			return fmt.Sprintf(served+"a third stream, opened while the second was open, was refused with %s (%v); %s",
+				thirdCode, thirdErr, rule), true
+		}
+		return served + "a third stream was served in place of the second: a new stream must not replace the running " +
+			"one; " + rule, true
+	case !answered:
+		return fmt.Sprintf("a second Process stream of the instance, opened while the first was open, was not refused "+
+			"within %v; %s", s.timeout/2, rule), true
+	case err == nil:
+		return "a second Process stream of the instance was served while the first was open; " + rule, true
+	default:
+		return fmt.Sprintf("a second Process stream of the instance was refused with %s (%v); %s", code, err, rule), true
+	}
+}
+
+// probeProcess opens a Process stream of the instance on ctx, sends its start and delivers what
+// its first Recv gives: nil when the stream was served a message, else the error that ended it.
+func probeProcess(ctx context.Context, sess *session, instance string) <-chan error {
+	answer := make(chan error, 1)
+	go func() {
+		stream, err := pb.NewProcessorClient(sess.conn).Process(ctx)
+		if err == nil {
+			// A refusal may reach the client before or after the start message; Recv tells it either way.
+			_ = stream.Send(&pb.ProcessorIn{Msg: &pb.ProcessorIn_Start{Start: &pb.ProcessStart{InstanceId: instance}}})
+			_, err = stream.Recv()
+		}
+		answer <- err
+	}()
+	return answer
+}
+
+// awaitProbe waits up to half the timeout for the answer of a probe stream; answered is false
+// when none came, the stream then being served and still open.
+func (s *suite) awaitProbe(probe <-chan error) (err error, answered bool) {
+	wait := time.NewTimer(s.timeout / 2)
+	defer wait.Stop()
+	select {
+	case err = <-probe:
+		return err, true
+	case <-wait.C:
+		return nil, false
+	}
+}
+
+// sendRecords starts the stream on the instance and sends the records. The caller ends its side.
 func sendRecords(stream pb.Processor_ProcessClient, instance string, records []*pb.Record) error {
 	err := stream.Send(&pb.ProcessorIn{Msg: &pb.ProcessorIn_Start{Start: &pb.ProcessStart{InstanceId: instance}}})
 	if err != nil {
@@ -539,7 +711,7 @@ func sendRecords(stream pb.Processor_ProcessClient, instance string, records []*
 			return err
 		}
 	}
-	return stream.CloseSend()
+	return nil
 }
 
 // checkOutputSend sends one small valid batch twice under the same message_id: the first answer
@@ -570,6 +742,10 @@ func (s *suite) checkOutputSend(sess *session, instance string) {
 		return
 	case first.GetOutcome() == pb.Outcome_OUTCOME_UNSPECIFIED || pb.Outcome_name[int32(first.GetOutcome())] == "":
 		s.fail("output.send", "Send answered the outcome %d, which is not one of the six", first.GetOutcome())
+	case first.GetOutcome() == pb.Outcome_OUTCOME_REJECT_INVALID && first.GetReason() == "":
+		s.fail("output.send", "Send answered REJECT_INVALID without a reason; the protocol says REJECT_INVALID comes \"with `reason`\"")
+		s.notRun("the first Send broke an outcome rule", "output.duplicate")
+		return
 	default:
 		s.pass("output.send", "%s", outcomeName(first.GetOutcome()))
 	}

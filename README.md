@@ -17,6 +17,7 @@ and a plugin never contains agent code.
 | `manifest/` | The model of `plugin.json`, its canonical JSON form and the offline validation of a configuration section. |
 | `sdk/` | The Go SDK: implement `Input`, `Processor` or `Output` and call `Serve`. |
 | `conformance/`, `cmd/laraedge-conformance/` | The conformance suite and its command. |
+| `scripts/` | `generate.sh`, which regenerates `pluginv1/` from `proto/` with the pinned `protoc`. |
 | `examples/` | Three example plugins, one per kind. See [examples/README.md](examples/README.md). |
 | `docs/handshake.md` | The handshake and the protocol for authors of plugins in other languages. |
 
@@ -144,7 +145,7 @@ line, the sockets and pipes, the services with their deadlines, the shutdown and
 
 - The dependency is one way: the agent imports the SDK, the SDK never imports the agent.
 - A plugin that depends only on this module may be open source or proprietary, at the author's choice.
-- Do not copy code from the AGPL agent into this repository.
+- This repository never contains AGPL code: do not copy code from the agent into it.
 - Plugins in other languages need only the `.proto` files and the handshake specification, with the official gRPC
   libraries.
 

@@ -37,10 +37,12 @@ type fakeTicker struct {
 func (f *fakeTicker) C() <-chan time.Time { return f.ch }
 func (f *fakeTicker) Stop()               {}
 
-// fakeClock hands out fakeTickers and remembers them in creation order.
+// fakeClock hands out fakeTickers and remembers them in creation order. Each new ticker closes
+// registered, which is then replaced, so that a test can wait for the next one.
 type fakeClock struct {
-	mu      sync.Mutex
-	tickers []*fakeTicker
+	mu         sync.Mutex
+	tickers    []*fakeTicker
+	registered chan struct{}
 }
 
 func (c *fakeClock) newTicker(d time.Duration) ticker {
@@ -48,7 +50,21 @@ func (c *fakeClock) newTicker(d time.Duration) ticker {
 	defer c.mu.Unlock()
 	f := &fakeTicker{interval: d, ch: make(chan time.Time)}
 	c.tickers = append(c.tickers, f)
+	if c.registered != nil {
+		close(c.registered)
+	}
+	c.registered = make(chan struct{})
 	return f
+}
+
+// state returns the number of tickers and a channel closed when the next one is registered.
+func (c *fakeClock) state() (int, <-chan struct{}) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.registered == nil {
+		c.registered = make(chan struct{})
+	}
+	return len(c.tickers), c.registered
 }
 
 // event is what a Run reported.
@@ -319,17 +335,18 @@ func TestRunPollsAtEachPointsTickAndAnswersPerDevice(t *testing.T) {
 
 func waitForTickers(t *testing.T, c *fakeClock, n int) {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		c.mu.Lock()
-		got := len(c.tickers)
-		c.mu.Unlock()
+	timeout := time.After(20 * time.Second)
+	for {
+		got, registered := c.state()
 		if got >= n {
 			return
 		}
-		time.Sleep(time.Millisecond)
+		select {
+		case <-registered:
+		case <-timeout:
+			t.Fatalf("Run created %d tickers, want at least %d", got, n)
+		}
 	}
-	t.Fatalf("Run created fewer than %d tickers", n)
 }
 
 func TestInt32CountersWrapAndInt64DoNot(t *testing.T) {

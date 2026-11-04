@@ -16,9 +16,10 @@ const maxCanonicalDepth = 512
 // Canonical returns the canonical form of a JSON document (decision S2): object keys sorted
 // at every depth in the byte order of their UTF-8 encoding, no insignificant whitespace,
 // numbers exactly as written, strings in UTF-8 with only the escapes JSON requires. It
-// refuses input that is not valid UTF-8, a string with an unpaired surrogate escape (both would
-// otherwise collapse into U+FFFD and make different documents compare equal), a document that is not exactly one JSON value, that repeats a key in an object
-// or that nests deeper than 512 levels.
+// refuses input that is not valid UTF-8 and a string with an unpaired surrogate escape
+// (both would otherwise collapse into U+FFFD and make different documents compare equal).
+// It also refuses a document that is not exactly one JSON value, that repeats a key in an
+// object or that nests deeper than 512 levels.
 func Canonical(raw []byte) ([]byte, error) {
 	if !utf8.Valid(raw) {
 		return nil, errors.New("canonical json: input is not valid UTF-8")
@@ -42,10 +43,8 @@ func Canonical(raw []byte) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
+// writeCanonical writes the next value, which is inside depth objects or arrays.
 func writeCanonical(dec *json.Decoder, out *bytes.Buffer, depth int) error {
-	if depth > maxCanonicalDepth {
-		return errors.New("canonical json: nesting too deep")
-	}
 	tok, err := dec.Token()
 	if err != nil {
 		if errors.Is(err, io.EOF) {
@@ -56,6 +55,9 @@ func writeCanonical(dec *json.Decoder, out *bytes.Buffer, depth int) error {
 
 	switch t := tok.(type) {
 	case json.Delim:
+		if depth >= maxCanonicalDepth {
+			return errors.New("canonical json: nesting too deep")
+		}
 		if t == '{' {
 			return writeCanonicalObject(dec, out, depth)
 		}

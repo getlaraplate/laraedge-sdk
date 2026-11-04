@@ -20,6 +20,20 @@
 //	                            nothing
 //	BROKEN_CONCURRENT_STREAMS=1 a second stream of an input instance is served, not refused
 //	BROKEN_SEND_ERROR=1         every Send fails with an error
+//	BROKEN_RETRY_AFTER_BARE=1   every Send answers RETRY_AFTER without retry_after
+//	BROKEN_REJECT_BARE=1        every Send answers REJECT_INVALID without a reason
+//	BROKEN_NEVER_ENDS=1         a Process stream does not end when the client closes its side
+//	BROKEN_NEVER_READS=1        a Process stream reads its start message and nothing more; the
+//	                            server keeps the 64 KiB flow-control window, so the client's
+//	                            sends block
+//	BROKEN_ENDS_EARLY=1         a Process stream ends OK on its own after answering the sample
+//	                            of value 3, the last of the suite's synthetic records
+//	BROKEN_CONCURRENT_PROCESS=1 a second Process stream of a processor instance is served, not
+//	                            refused
+//	BROKEN_NEWEST_WINS=1        a new Process stream of a processor instance ends the running one
+//	                            with OK and is served in its place
+//	BROKEN_SAMPLE_ON_REFUSAL=1  before refusing a second Process stream, the processor emits one
+//	                            sample on the running one (allowed: a processor may emit any time)
 //	BROKEN_EXIT_BEFORE_SHUTDOWN=1 after answering DUPLICATE, exit 0 at the next call, unanswered
 //
 // A section is valid unless it has the top-level member "refuse": true. A section with a
@@ -77,7 +91,13 @@ func main() {
 	fmt.Printf("1|v1|%s|%s\n", network, address)
 
 	p := newPlugin()
-	p.server = grpc.NewServer(grpc.ChainUnaryInterceptor(p.exitWhenArmed))
+	opts := []grpc.ServerOption{grpc.ChainUnaryInterceptor(p.exitWhenArmed)}
+	if defect("BROKEN_NEVER_READS") {
+		// A fixed window turns off the dynamic window of gRPC, which would otherwise grow to
+		// megabytes and take the records without the processor reading them.
+		opts = append(opts, grpc.InitialWindowSize(64<<10), grpc.InitialConnWindowSize(64<<10))
+	}
+	p.server = grpc.NewServer(opts...)
 	pb.RegisterPluginServer(p.server, &pluginService{p: p})
 	pb.RegisterInputServer(p.server, &inputService{p: p})
 	pb.RegisterProcessorServer(p.server, &processorService{p: p})
@@ -101,7 +121,9 @@ type plugin struct {
 
 	mu       sync.Mutex
 	sections map[string]json.RawMessage // key: kind + "/" + instance
-	active   map[string]bool            // input instances with a running stream
+	active   map[string]bool            // key: kind + "/" + instance, with a running stream
+	newest   map[string]chan struct{}   // BROKEN_NEWEST_WINS: closed when a newer stream replaces it
+	running  map[string]func()          // BROKEN_SAMPLE_ON_REFUSAL: emits a sample on the running stream
 	seen     map[string]bool            // output instance + "/" + message_id
 
 	shutdownOnce sync.Once
@@ -122,6 +144,8 @@ func newPlugin() *plugin {
 	return &plugin{
 		sections: map[string]json.RawMessage{},
 		active:   map[string]bool{},
+		newest:   map[string]chan struct{}{},
+		running:  map[string]func(){},
 		seen:     map[string]bool{},
 		shutdown: make(chan struct{}),
 	}
@@ -151,6 +175,37 @@ func (p *plugin) configure(kind string, req *pb.ConfigureRequest) (*pb.Configure
 	}
 	p.sections[kind+"/"+id] = append(json.RawMessage(nil), req.GetConfig()...)
 	return &pb.ConfigureResponse{}, nil
+}
+
+// replaceStream makes the caller the running stream of the instance and ends the one it
+// replaces: the returned channel is closed when a newer stream replaces the caller.
+func (p *plugin) replaceStream(kind, id string) <-chan struct{} {
+	key := kind + "/" + id
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if replaced, ok := p.newest[key]; ok {
+		close(replaced)
+	}
+	replaced := make(chan struct{})
+	p.newest[key] = replaced
+	return replaced
+}
+
+// claimStream marks the instance as streaming. Another stream of the instance is refused with
+// ALREADY_EXISTS unless shared. The returned function releases the claim.
+func (p *plugin) claimStream(kind, id string, shared bool) (release func(), err error) {
+	key := kind + "/" + id
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.active[key] && !shared {
+		return nil, status.Error(codes.AlreadyExists, "the instance already has a running stream")
+	}
+	p.active[key] = true
+	return func() {
+		p.mu.Lock()
+		delete(p.active, key)
+		p.mu.Unlock()
+	}, nil
 }
 
 func (p *plugin) section(kind, id string) (json.RawMessage, error) {
@@ -249,18 +304,11 @@ func (s *inputService) Subscribe(req *pb.SubscribeRequest, stream pb.Input_Subsc
 	if err != nil {
 		return err
 	}
-	s.p.mu.Lock()
-	if s.p.active[id] && !defect("BROKEN_CONCURRENT_STREAMS") {
-		s.p.mu.Unlock()
-		return status.Error(codes.AlreadyExists, "the instance already has a running stream")
+	release, err := s.p.claimStream("input", id, defect("BROKEN_CONCURRENT_STREAMS"))
+	if err != nil {
+		return err
 	}
-	s.p.active[id] = true
-	s.p.mu.Unlock()
-	defer func() {
-		s.p.mu.Lock()
-		delete(s.p.active, id)
-		s.p.mu.Unlock()
-	}()
+	defer release()
 
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
@@ -322,9 +370,78 @@ func (s *processorService) Process(stream pb.Processor_ProcessServer) error {
 	if err != nil {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	}
+	if defect("BROKEN_NEWEST_WINS") {
+		replaced := s.p.replaceStream("processor", first.GetStart().GetInstanceId())
+		answered := make(chan error, 1)
+		go func() { answered <- s.answer(stream, cfg) }()
+		select {
+		case err := <-answered:
+			return err
+		case <-replaced:
+			return nil
+		}
+	}
+	id := first.GetStart().GetInstanceId()
+	release, err := s.p.claimStream("processor", id, defect("BROKEN_CONCURRENT_PROCESS"))
+	if err != nil {
+		if defect("BROKEN_SAMPLE_ON_REFUSAL") {
+			s.p.mu.Lock()
+			emit := s.p.running[id]
+			s.p.mu.Unlock()
+			if emit != nil {
+				emit()
+			}
+		}
+		return err
+	}
+	defer release()
+	if defect("BROKEN_SAMPLE_ON_REFUSAL") {
+		locked := &lockedStream{Processor_ProcessServer: stream}
+		stream = locked
+		s.p.mu.Lock()
+		s.p.running[id] = func() {
+			for _, device := range cfg.Devices {
+				for _, signal := range device.Signals {
+					_ = locked.Send(&pb.ProcessorOut{Sample: sample(device.Device, signal.Signal, 1)})
+					return
+				}
+			}
+		}
+		s.p.mu.Unlock()
+		defer func() {
+			s.p.mu.Lock()
+			delete(s.p.running, id)
+			s.p.mu.Unlock()
+		}()
+	}
+	if defect("BROKEN_NEVER_READS") {
+		<-stream.Context().Done()
+		return stream.Context().Err()
+	}
+	return s.answer(stream, cfg)
+}
+
+// lockedStream serialises the sends of a Process stream that two goroutines emit on.
+type lockedStream struct {
+	pb.Processor_ProcessServer
+	mu sync.Mutex
+}
+
+func (l *lockedStream) Send(out *pb.ProcessorOut) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.Processor_ProcessServer.Send(out)
+}
+
+// answer reads the records of a started Process stream and answers them until the client ends
+// its side.
+func (s *processorService) answer(stream pb.Processor_ProcessServer, cfg sdk.ProcessorConfig) error {
 	for {
 		msg, err := stream.Recv()
 		if err == io.EOF {
+			if defect("BROKEN_NEVER_ENDS") {
+				<-stream.Context().Done()
+			}
 			return nil
 		}
 		if err != nil {
@@ -346,6 +463,9 @@ func (s *processorService) Process(stream pb.Processor_ProcessServer) error {
 				}
 			}
 		}
+		if defect("BROKEN_ENDS_EARLY") && in.GetValue().GetIntValue() == 3 {
+			return nil
+		}
 	}
 }
 
@@ -365,6 +485,12 @@ func (s *outputService) Send(_ context.Context, req *pb.SendRequest) (*pb.SendRe
 	}
 	if defect("BROKEN_SEND_ERROR") {
 		return nil, status.Error(codes.Unavailable, "the destination is down")
+	}
+	if defect("BROKEN_RETRY_AFTER_BARE") {
+		return &pb.SendResult{Outcome: pb.Outcome_OUTCOME_RETRY_AFTER}, nil
+	}
+	if defect("BROKEN_REJECT_BARE") {
+		return &pb.SendResult{Outcome: pb.Outcome_OUTCOME_REJECT_INVALID}, nil
 	}
 	key := id + "/" + req.GetBatch().GetMessageId()
 	s.p.mu.Lock()
