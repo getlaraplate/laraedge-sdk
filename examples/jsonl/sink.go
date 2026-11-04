@@ -41,12 +41,18 @@ type target struct {
 
 // fileState is what the sink knows of one file. Every instance configured with that file, and an
 // instance reconfigured while one of its sends is still running, shares it: one lock orders
-// their appends, so a line answered ACCEPTED is never overwritten by another.
+// their appends, so a line answered ACCEPTED is never overwritten by another. It lives as long
+// as the process, keyed by path: a file removed, replaced (rotated) or made shorter behind the
+// sink's back is noticed at the next send, and then read again (see refresh).
 type fileState struct {
 	mu sync.Mutex
-	// seen holds the message ids in the file: those read when the file was first configured and
-	// those stored since.
+	// seen holds the message ids in the file: those read when the file was first configured, or
+	// read again after it was replaced, and those stored since.
 	seen map[string]bool
+	// identity is the file the last durable append wrote, and size the size it left it at; nil
+	// until the first one.
+	identity os.FileInfo
+	size     int64
 	// dirSynced is set once the parent directory has been fsynced after the file was opened.
 	dirSynced bool
 	// dirty is set while an append that started writing has not been fsynced; clean is the size
@@ -79,9 +85,10 @@ func openFile(path string) (file, error) {
 
 // sink implements sdk.Output.
 type sink struct {
-	// open and syncDir reach the disk; tests replace them.
+	// open, syncDir and readIDs reach the disk; tests replace them.
 	open    func(path string) (file, error)
 	syncDir func(dir string) error
+	readIDs func(path string) (map[string]bool, error)
 
 	mu        sync.Mutex
 	instances map[string]*target
@@ -90,7 +97,7 @@ type sink struct {
 }
 
 func newSink() *sink {
-	return &sink{open: openFile, syncDir: syncDir, instances: map[string]*target{}, files: map[string]*fileState{}}
+	return &sink{open: openFile, syncDir: syncDir, readIDs: readMessageIDs, instances: map[string]*target{}, files: map[string]*fileState{}}
 }
 
 func (s *sink) Configure(_ context.Context, instance string, cfg json.RawMessage) []sdk.ConfigError {
@@ -125,15 +132,24 @@ func (s *sink) fileState(path string) (*fileState, error) {
 		key = filepath.Clean(path)
 	}
 	s.mu.Lock()
+	state, ok := s.files[key]
+	s.mu.Unlock()
+	if ok {
+		return state, nil
+	}
+	// The file is read without the sink's lock, so that a large file does not hold the sends of
+	// the other instances. Two first configurations of one file may both read it; the first to
+	// come back is kept.
+	seen, err := s.readIDs(path)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
 	defer s.mu.Unlock()
 	if state, ok := s.files[key]; ok {
 		return state, nil
 	}
-	seen, err := readMessageIDs(path)
-	if err != nil {
-		return nil, err
-	}
-	state := &fileState{seen: seen}
+	state = &fileState{seen: seen}
 	s.files[key] = state
 	return state, nil
 }
@@ -211,6 +227,9 @@ func (s *sink) Send(ctx context.Context, instance string, b sdk.Batch) sdk.Outco
 	if _, err := os.Stat(t.suspended); err == nil {
 		return sdk.Outcome{Kind: sdk.OutcomeSuspendAuth}
 	}
+	if err := s.refresh(t); err != nil {
+		return sdk.Outcome{Kind: sdk.OutcomeRetryAfter, RetryAfter: retryDelay}
+	}
 	if f.seen[b.MessageID] {
 		return sdk.Outcome{Kind: sdk.OutcomeDuplicate}
 	}
@@ -226,6 +245,32 @@ func (s *sink) Send(ctx context.Context, instance string, b sdk.Batch) sdk.Outco
 	}
 	f.seen[b.MessageID] = true
 	return sdk.Outcome{Kind: sdk.OutcomeAccepted}
+}
+
+// refresh forgets what the sink knows of the file of t when the file is no longer the one it last
+// wrote: removed, replaced (for example rotated away and created again) or shorter than the sink
+// left it. Its message ids are then read again, and a truncation owed to the old file is dropped,
+// so it never extends the new one. The caller holds the lock of the file's state. A file
+// replaced between this check and the append is not noticed until the next send.
+func (s *sink) refresh(t *target) error {
+	state := t.file
+	if state.identity == nil {
+		return nil
+	}
+	info, err := os.Stat(t.path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err == nil && os.SameFile(state.identity, info) && info.Size() >= state.size {
+		return nil
+	}
+	seen, err := s.readIDs(t.path)
+	if err != nil {
+		return err
+	}
+	state.seen, state.identity, state.size = seen, nil, 0
+	state.dirSynced, state.dirty, state.clean = false, false, 0
+	return nil
 }
 
 // invalidReason says why the batch cannot be stored, without quoting anything from it.
@@ -262,11 +307,9 @@ func (s *sink) appendSynced(t *target, data []byte) (err error) {
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-	}()
+	// Once Sync succeeded the line is durable, and a failed Close cannot undo it; before that the
+	// append has already failed. Either way the error of Close changes nothing.
+	defer func() { _ = f.Close() }()
 	if !state.dirSynced {
 		if err := s.syncDir(filepath.Dir(t.path)); err != nil {
 			return err
@@ -303,6 +346,8 @@ func (s *sink) appendSynced(t *target, data []byte) (err error) {
 		return err
 	}
 	state.dirty = false
+	state.identity = info
+	state.size = size + int64(len(data))
 	return nil
 }
 

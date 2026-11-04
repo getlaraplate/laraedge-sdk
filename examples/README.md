@@ -85,6 +85,12 @@ fsync failed may already be on disk: the next append first truncates the file ba
 before that line, so the agent's resend of the batch is stored once, and while the truncation fails
 it answers `RETRY_AFTER` without writing. Qualities, priorities and event kinds are written as words
 chosen by the constants of the SDK, not by their order. Instances configured with the same file
-share one lock and one set of message ids, so their lines never overwrite each other. The path of
+share one lock and one set of message ids, so their lines never overwrite each other and a batch one
+of them stored is a `DUPLICATE` for the others. The message ids of a file are read at its first
+configuration and kept for the life of the process: configuring the file again does not read it again.
+A file removed, replaced (rotated) or made shorter by someone else is noticed at the next send, which
+reads its message ids again and never extends it to an old size. The state is keyed by the cleaned
+absolute path, so symbolic or hard links to one file get separate states and do not share their
+dedupe or their lock. The path of
 `conformance.json` is relative, so a run that sends batches writes it in the working directory of
 the plugin.
