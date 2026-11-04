@@ -219,11 +219,11 @@ not a `start`, or a later one is not a `record` (or is an invalid record).
 ### Output outcomes
 
 `Send` answers exactly one of: `ACCEPTED`, `DUPLICATE` (stored earlier; the agent advances), `RETRY_AFTER`
-(optionally with `retry_after`; without it the agent uses its own backoff), `SPLIT` (batch too large; the agent splits it in two), `REJECT_INVALID` (with
-`reason`; the agent drops the batch and records a loss) and `SUSPEND_AUTH` (credentials refused; the agent suspends
-sending and keeps buffering). `OUTCOME_UNSPECIFIED` is never valid. The message identifier of a batch (`message_id`, a
-UUIDv7) is the key of idempotency: sending the same identifier twice must give `ACCEPTED` or `DUPLICATE` both times. A
-plugin output never buffers; the agent does.
+(optionally with `retry_after`; without it the agent uses its own backoff), `SPLIT` (batch too large; the agent splits
+it in two), `REJECT_INVALID` (with `reason`; the agent drops the batch and records a loss) and `SUSPEND_AUTH`
+(credentials refused; the agent suspends sending and keeps buffering). `OUTCOME_UNSPECIFIED` is never valid. The
+message identifier of a batch (`message_id`, a UUIDv7) is the key of idempotency: sending the same identifier twice
+must give `ACCEPTED` or `DUPLICATE` both times. A plugin output never buffers; the agent does.
 
 ### One stream per instance
 
