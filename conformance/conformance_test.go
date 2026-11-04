@@ -237,8 +237,11 @@ func TestEachDefectFailsItsCheck(t *testing.T) {
 		env     string
 		failing string
 		skipped []string
-		// detail, when set, must be part of the failing check's detail.
+		// detail, when set, must be part of the failing check's detail, or of processor.signals'
+		// when pass is set.
 		detail string
+		// pass: no check fails.
+		pass bool
 	}{
 		{name: "started by hand without the cookie does not exit", env: "BROKEN_IGNORE_COOKIE=1", failing: "no-cookie"},
 		{
@@ -266,8 +269,10 @@ func TestEachDefectFailsItsCheck(t *testing.T) {
 			skipped: []string{"output.duplicate"},
 		},
 		{
-			name: "RETRY_AFTER without retry_after", env: "BROKEN_RETRY_AFTER_BARE=1", failing: "output.send",
-			skipped: []string{"output.duplicate"}, detail: "RETRY_AFTER",
+			// RETRY_AFTER may come without retry_after (the agent uses its own backoff): output.send
+			// passes, and only output.duplicate fails, since RETRY_AFTER does not store the batch.
+			name: "RETRY_AFTER without retry_after", env: "BROKEN_RETRY_AFTER_BARE=1", failing: "output.duplicate",
+			detail: "RETRY_AFTER, then RETRY_AFTER",
 		},
 		{
 			name: "REJECT_INVALID without a reason", env: "BROKEN_REJECT_BARE=1", failing: "output.send",
@@ -280,6 +285,12 @@ func TestEachDefectFailsItsCheck(t *testing.T) {
 		{
 			name: "second Process stream served and the first never ends", env: "BROKEN_CONCURRENT_PROCESS=1 BROKEN_NEVER_ENDS=1",
 			failing: "processor.signals", detail: "ALREADY_EXISTS",
+		},
+		{
+			// The processor ends its stream on its own once it has the records, before the suite
+			// closes its side: the second stream it then serves is not a second concurrent stream.
+			name: "Process stream ended by the processor before the suite closed its side", env: "BROKEN_ENDS_EARLY=1",
+			pass: true, detail: "the second-stream rule was not probed",
 		},
 		{name: "Shutdown past its deadline", env: "BROKEN_SLOW_SHUTDOWN=1", failing: "shutdown", detail: "still running"},
 		{
@@ -299,11 +310,30 @@ func TestEachDefectFailsItsCheck(t *testing.T) {
 			t.Parallel()
 			report := runSuite(t, pluginDirs["broken"], 3*time.Second, strings.Fields(tt.env)...)
 			assertReport(t, report, checkNames(true, true, true), tt.failing, tt.skipped...)
-			if tt.detail != "" {
+			switch {
+			case tt.pass:
+				assertDetail(t, report, "processor.signals", tt.detail)
+			case tt.detail != "":
 				assertDetail(t, report, tt.failing, tt.detail)
 			}
 		})
 	}
+}
+
+// TestProcessorThatNeverReadsItsInput: a processor that takes the start message and then never
+// reads blocks the suite's sends once the flow-control window is full. The sends are bounded by
+// the timeout, so the check fails in bounded time instead of hanging the run.
+func TestProcessorThatNeverReadsItsInput(t *testing.T) {
+	// Eight samples of 256 KiB each: far past the 64 KiB window the broken plugin keeps.
+	big := strings.Repeat("x", 256<<10)
+	var records []string
+	for range 8 {
+		records = append(records, `{"sample": {"device": "machine-1", "signal": "count", "value": {"string": "`+big+`"}}}`)
+	}
+	dir := pluginCopy(t, "broken", brokenFixtures("["+strings.Join(records, ",")+"]"))
+	report := runSuite(t, dir, 3*time.Second, "BROKEN_NEVER_READS=1")
+	assertReport(t, report, checkNames(true, true, true), "processor.signals")
+	assertDetail(t, report, "processor.signals", "the records were not taken within 3s")
 }
 
 // TestMissingFixturesOfAnOfferedKind removes the output fixtures of the broken plugin, which

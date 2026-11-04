@@ -33,12 +33,17 @@
 //	input.probe          Probe answers within its 30 s deadline with one sample per point
 //	processor.configure  as input.configure, for processor fixtures
 //	processor.signals    fed the records of the first valid fixture (see Records below), the
-//	                     processor emits at least one sample, and only of the devices and
-//	                     signals the fixture declares
+//	                     processor takes them within the timeout and emits at least one
+//	                     sample, and only of the devices and signals the fixture declares;
+//	                     while that stream is open a second Process stream of the instance is
+//	                     refused with ALREADY_EXISTS (not probed when the processor ended the
+//	                     stream on its own before the suite closed its side)
 //	output.configure     as input.configure, for output fixtures
-//	output.send          a valid batch is answered with one of the six outcomes
+//	output.send          a valid batch is answered with one of the six outcomes; REJECT_INVALID
+//	                     carries a reason (RETRY_AFTER may come without retry_after)
 //	output.duplicate     the same message_id sent twice is answered ACCEPTED or DUPLICATE both
-//	                     times; not run when the first Send failed with an error
+//	                     times; not run when the first Send failed with an error or answered
+//	                     REJECT_INVALID without a reason
 //	shutdown             the plugin still answers a health check, then after Shutdown with a
 //	                     5 s deadline it exits 0 within it (plus 1 s to be reaped); an
 //	                     UNAVAILABLE answer or EOF to Shutdown counts as an answer
@@ -51,9 +56,6 @@
 // handshake failed) is reported failed with a Detail starting with "not run: ": a report never
 // passes a check it did not perform. For the same reason a check with nothing to judge fails: an
 // input stream without events, a processor that emits nothing for the records it is fed.
-//
-// The suite opens one Process stream per processor instance, so the one-stream rule is checked
-// on inputs only.
 //
 // # Records
 //

@@ -23,6 +23,11 @@
 //	BROKEN_RETRY_AFTER_BARE=1   every Send answers RETRY_AFTER without retry_after
 //	BROKEN_REJECT_BARE=1        every Send answers REJECT_INVALID without a reason
 //	BROKEN_NEVER_ENDS=1         a Process stream does not end when the client closes its side
+//	BROKEN_NEVER_READS=1        a Process stream reads its start message and nothing more; the
+//	                            server keeps the 64 KiB flow-control window, so the client's
+//	                            sends block
+//	BROKEN_ENDS_EARLY=1         a Process stream ends OK on its own after answering the sample
+//	                            of value 3, the last of the suite's synthetic records
 //	BROKEN_CONCURRENT_PROCESS=1 a second Process stream of a processor instance is served, not
 //	                            refused
 //	BROKEN_EXIT_BEFORE_SHUTDOWN=1 after answering DUPLICATE, exit 0 at the next call, unanswered
@@ -82,7 +87,13 @@ func main() {
 	fmt.Printf("1|v1|%s|%s\n", network, address)
 
 	p := newPlugin()
-	p.server = grpc.NewServer(grpc.ChainUnaryInterceptor(p.exitWhenArmed))
+	opts := []grpc.ServerOption{grpc.ChainUnaryInterceptor(p.exitWhenArmed)}
+	if defect("BROKEN_NEVER_READS") {
+		// A fixed window turns off the dynamic window of gRPC, which would otherwise grow to
+		// megabytes and take the records without the processor reading them.
+		opts = append(opts, grpc.InitialWindowSize(64<<10), grpc.InitialConnWindowSize(64<<10))
+	}
+	p.server = grpc.NewServer(opts...)
 	pb.RegisterPluginServer(p.server, &pluginService{p: p})
 	pb.RegisterInputServer(p.server, &inputService{p: p})
 	pb.RegisterProcessorServer(p.server, &processorService{p: p})
@@ -342,6 +353,10 @@ func (s *processorService) Process(stream pb.Processor_ProcessServer) error {
 		return err
 	}
 	defer release()
+	if defect("BROKEN_NEVER_READS") {
+		<-stream.Context().Done()
+		return stream.Context().Err()
+	}
 	for {
 		msg, err := stream.Recv()
 		if err == io.EOF {
@@ -368,6 +383,9 @@ func (s *processorService) Process(stream pb.Processor_ProcessServer) error {
 					return err
 				}
 			}
+		}
+		if defect("BROKEN_ENDS_EARLY") && in.GetValue().GetIntValue() == 3 {
+			return nil
 		}
 	}
 }

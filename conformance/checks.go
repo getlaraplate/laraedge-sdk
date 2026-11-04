@@ -469,11 +469,16 @@ func (s *suite) checkProcessorSignals(sess *session, instance string) {
 		source = "the records of conformance.json"
 	}
 
-	// The timeout of the samples starts when the suite ends its side of the stream, so the
-	// second-stream probe does not shorten it.
+	// The sends are bounded by the timeout; the timeout of the samples starts again when the
+	// suite ends its side of the stream, so neither the sends nor the second-stream probe shorten
+	// it.
 	ctx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
 	var expired atomic.Bool
+	expire := func() {
+		expired.Store(true)
+		cancel()
+	}
 	stream, err := pb.NewProcessorClient(sess.conn).Process(ctx)
 	if err != nil {
 		s.fail(name, "Process: %v", err)
@@ -485,6 +490,7 @@ func (s *suite) checkProcessorSignals(sess *session, instance string) {
 	}
 	collected := make(chan result, 1)
 	firstSample := make(chan struct{})
+	ended := make(chan struct{})
 	go func() {
 		var r result
 		for {
@@ -493,6 +499,7 @@ func (s *suite) checkProcessorSignals(sess *session, instance string) {
 				if !errors.Is(err, io.EOF) {
 					r.err = err
 				}
+				close(ended)
 				collected <- r
 				return
 			}
@@ -503,26 +510,31 @@ func (s *suite) checkProcessorSignals(sess *session, instance string) {
 		}
 	}()
 
+	sending := time.AfterFunc(s.timeout, expire)
 	sendErr := sendRecords(stream, instance, records)
+	if !sending.Stop() {
+		sendErr = fmt.Errorf("the records were not taken within %v; the processor must keep reading its input", s.timeout)
+	}
 	// The first stream is still open: its sample proves the plugin serves it, so a second stream of
 	// the instance must now be refused. A processor that answers only at the end of its input
-	// gets half the timeout, then the second stream is tried anyway.
+	// gets half the timeout, then the second stream is tried anyway. A processor that ended the
+	// stream on its own has no open stream left to probe against.
 	wait := time.NewTimer(s.timeout / 2)
 	select {
 	case <-firstSample:
+	case <-ended:
 	case <-wait.C:
 	case <-s.ctx.Done():
 	}
 	wait.Stop()
-	secondErr := s.refusedSecondProcess(sess, instance)
+	secondErr, probed := s.refusedSecondProcess(sess, instance, ended)
 	if sendErr == nil {
 		sendErr = stream.CloseSend()
 	}
-	deadline := time.AfterFunc(s.timeout, func() {
-		expired.Store(true)
-		cancel()
-	})
-	defer deadline.Stop()
+	if !expired.Load() {
+		deadline := time.AfterFunc(s.timeout, expire)
+		defer deadline.Stop()
+	}
 	r := <-collected
 	if expired.Load() && r.err != nil {
 		r.err = status.Error(codes.DeadlineExceeded, r.err.Error())
@@ -556,14 +568,29 @@ func (s *suite) checkProcessorSignals(sess *session, instance string) {
 		s.fail(name, "no sample within %v for %s, %s", s.timeout, source, nothing)
 	case secondErr != "":
 		s.fail(name, "%s", secondErr)
+	case !probed:
+		s.pass(name, "%d samples, all of declared signals, for %s; the second-stream rule was not probed: the "+
+			"processor ended its stream before the suite closed its side", len(r.samples), source)
 	default:
 		s.pass(name, "%d samples, all of declared signals, for %s", len(r.samples), source)
 	}
 }
 
+// endedGrace is how long a second Process stream that was not refused waits for the first stream
+// to be seen ended. The plugin ends the first stream before it serves the second one, and both
+// travel on one connection, so the end is already on its way when the second answer arrives.
+const endedGrace = 250 * time.Millisecond
+
 // refusedSecondProcess opens a second Process stream of the instance while the first one is
 // open and returns what is wrong with its answer, empty when it was refused with ALREADY_EXISTS.
-func (s *suite) refusedSecondProcess(sess *session, instance string) string {
+// ended is closed when the first stream ended; probed is false when it ended before the probe
+// could tell anything, since a second stream is then rightly served.
+func (s *suite) refusedSecondProcess(sess *session, instance string, ended <-chan struct{}) (problem string, probed bool) {
+	select {
+	case <-ended:
+		return "", false
+	default:
+	}
 	ctx, cancel := context.WithTimeout(s.ctx, s.timeout/2)
 	defer cancel()
 	stream, err := pb.NewProcessorClient(sess.conn).Process(ctx)
@@ -572,17 +599,29 @@ func (s *suite) refusedSecondProcess(sess *session, instance string) string {
 		_ = stream.Send(&pb.ProcessorIn{Msg: &pb.ProcessorIn_Start{Start: &pb.ProcessStart{InstanceId: instance}}})
 		_, err = stream.Recv()
 	}
+	code := status.Code(err)
+	if code == codes.AlreadyExists {
+		return "", true
+	}
+	if s.ctx.Err() != nil {
+		return fmt.Sprintf("the run was interrupted while a second Process stream was probed: %v", s.ctx.Err()), true
+	}
+	grace := time.NewTimer(endedGrace)
+	defer grace.Stop()
+	select {
+	case <-ended:
+		return "", false
+	case <-grace.C:
+	}
 	const rule = "the protocol allows one Process stream per processor instance and refuses another with ALREADY_EXISTS"
-	switch code := status.Code(err); {
+	switch {
 	case err == nil:
-		return "a second Process stream of the instance was served while the first was open; " + rule
-	case code == codes.AlreadyExists:
-		return ""
+		return "a second Process stream of the instance was served while the first was open; " + rule, true
 	case code == codes.DeadlineExceeded || code == codes.Canceled:
 		return fmt.Sprintf("a second Process stream of the instance, opened while the first was open, was not refused "+
-			"within %v; %s", s.timeout/2, rule)
+			"within %v; %s", s.timeout/2, rule), true
 	default:
-		return fmt.Sprintf("a second Process stream of the instance was refused with %s (%v); %s", code, err, rule)
+		return fmt.Sprintf("a second Process stream of the instance was refused with %s (%v); %s", code, err, rule), true
 	}
 }
 
@@ -628,10 +667,6 @@ func (s *suite) checkOutputSend(sess *session, instance string) {
 		return
 	case first.GetOutcome() == pb.Outcome_OUTCOME_UNSPECIFIED || pb.Outcome_name[int32(first.GetOutcome())] == "":
 		s.fail("output.send", "Send answered the outcome %d, which is not one of the six", first.GetOutcome())
-	case first.GetOutcome() == pb.Outcome_OUTCOME_RETRY_AFTER && first.GetRetryAfter() == nil:
-		s.fail("output.send", "Send answered RETRY_AFTER without retry_after; the protocol says RETRY_AFTER comes \"with `retry_after`\"")
-		s.notRun("the first Send broke an outcome rule", "output.duplicate")
-		return
 	case first.GetOutcome() == pb.Outcome_OUTCOME_REJECT_INVALID && first.GetReason() == "":
 		s.fail("output.send", "Send answered REJECT_INVALID without a reason; the protocol says REJECT_INVALID comes \"with `reason`\"")
 		s.notRun("the first Send broke an outcome rule", "output.duplicate")
