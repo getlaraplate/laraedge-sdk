@@ -15,7 +15,11 @@ import (
 // the host dies, or when the plugin is reaped (ending any descendant left behind).
 //
 // The plugin starts suspended and runs only once it is in the job, so every process it starts
-// is in the job too.
+// is in the job too. One window remains: if the host dies between Start and attach, the plugin
+// stays suspended outside the job. It has run no code, so it starts nothing, but nothing kills
+// it either. No Go or golang.org/x/sys API closes that window: creating the process inside the
+// job takes PROC_THREAD_ATTRIBUTE_JOB_LIST, which golang.org/x/sys does not define and
+// syscall.SysProcAttr cannot pass.
 type processTree struct {
 	job windows.Handle
 }

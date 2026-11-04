@@ -55,10 +55,12 @@ func isSuspended(t *testing.T, pid int) bool {
 		if err != nil {
 			continue // the thread ended meanwhile
 		}
-		previous, _, callErr := procSuspendThread.Call(uintptr(thread))
+		previous, _, _ := procSuspendThread.Call(uintptr(thread))
 		if previous == 0xffffffff {
+			// The thread exited between OpenThread and SuspendThread: it is not a thread of the
+			// process any more.
 			_ = windows.CloseHandle(thread)
-			t.Fatalf("SuspendThread: %v", callErr)
+			continue
 		}
 		_, _ = windows.ResumeThread(thread)
 		_ = windows.CloseHandle(thread)

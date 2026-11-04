@@ -600,6 +600,10 @@ func (w *gatedWriter) release() { w.openOnce.Do(func() { close(w.open) }) }
 
 // TestWaitDeliversOutputAWriterHeldBack keeps the caller's writer blocked until the host has
 // reaped the plugin: Wait must not return before every line reached the writer.
+//
+// The writer must be released within outputDrainTimeout (2 s) of the plugin's exit: past it the
+// host gives up on the copiers and the lines they still hold are dropped by design. The steps
+// between the exit and the release only poll the reaping and make one non-blocking Dial.
 func TestWaitDeliversOutputAWriterHeldBack(t *testing.T) {
 	const count = 200
 	writer := &gatedWriter{open: make(chan struct{})}
@@ -624,6 +628,8 @@ func TestWaitDeliversOutputAWriterHeldBack(t *testing.T) {
 		<-ticker.C
 	}
 	// Dial reports ErrExited at once when Wait would return; a cancelled context ends it otherwise.
+	// A regression guard, and a probabilistic one: it catches a Wait that would return early only
+	// if it would already have returned at this moment.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if conn, err := process.Dial(ctx); errors.Is(err, handshake.ErrExited) {
