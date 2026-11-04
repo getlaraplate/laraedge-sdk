@@ -1,6 +1,7 @@
 package manifest_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/getlaraplate/laraedge-sdk/manifest"
@@ -56,6 +57,18 @@ func TestCanonicalRefuses(t *testing.T) {
 	}
 }
 
+func TestCanonicalDepthLimit(t *testing.T) {
+	nest := func(levels int) string {
+		return strings.Repeat("[", levels) + strings.Repeat("]", levels)
+	}
+	if _, err := manifest.Canonical([]byte(nest(512))); err != nil {
+		t.Fatalf("512 levels: %v", err)
+	}
+	if got, err := manifest.Canonical([]byte(nest(514))); err == nil {
+		t.Fatalf("514 levels: want an error, got %d bytes", len(got))
+	}
+}
+
 func TestCanonicalRefusesLossyText(t *testing.T) {
 	tests := []struct{ name, in string }{
 		{"invalid UTF-8 byte", "{\"a\":\"\xff\"}"},
@@ -80,7 +93,7 @@ func TestCanonicalKeepsValidSurrogatesAndLookalikes(t *testing.T) {
 	tests := []struct{ name, in, want string }{
 		{"valid pair", `{"a":"😀"}`, `{"a":"😀"}`},
 		{"escaped backslash before u", `{"a":"\\ud800"}`, `{"a":"\\ud800"}`},
-		{"surrogate text outside strings is not scanned", `{"a":"x"}`, `{"a":"x"}`},
+		{"escaped valid pair", `{"a":"\ud83d\ude00"}`, `{"a":"😀"}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

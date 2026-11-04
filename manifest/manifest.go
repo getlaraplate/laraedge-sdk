@@ -6,6 +6,7 @@ package manifest
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -57,7 +58,8 @@ type Problem struct {
 	Message string
 }
 
-// ReadModes and PointTypes are the values the agent's configuration schema knows.
+// allReadModes and allTypes are the read modes and point types the agent's configuration
+// schema knows.
 var (
 	allReadModes = []string{"poll", "subscribe", "event"}
 	allTypes     = []string{"bool", "int16", "uint16", "int32", "uint32", "int64", "uint64", "float32", "float64", "string"}
@@ -317,15 +319,93 @@ func readMode(read any) string {
 }
 
 // sortProblems orders problems by path then message, so the result does not depend on the
-// order the schema library walks properties in.
+// order the schema library walks properties in. Paths compare segment by segment and array
+// indexes compare as numbers, so devices[2] comes before devices[10].
 func sortProblems(problems []Problem) []Problem {
 	slices.SortFunc(problems, func(a, b Problem) int {
-		if c := strings.Compare(a.Path, b.Path); c != 0 {
+		if c := comparePaths(a.Path, b.Path); c != 0 {
 			return c
 		}
 		return strings.Compare(a.Message, b.Message)
 	})
 	return problems
+}
+
+// pathSegment is one step of a problem path: an object key or an array index.
+type pathSegment struct {
+	key     string
+	index   int
+	isIndex bool
+}
+
+// comparePaths orders two problem paths segment by segment. A path that is a prefix of
+// another comes first; at the same position an index comes before a key.
+func comparePaths(a, b string) int {
+	sa, sb := splitPath(a), splitPath(b)
+	for i := 0; i < len(sa) && i < len(sb); i++ {
+		x, y := sa[i], sb[i]
+		switch {
+		case x.isIndex && y.isIndex:
+			if c := cmp.Compare(x.index, y.index); c != 0 {
+				return c
+			}
+		case x.isIndex:
+			return -1
+		case y.isIndex:
+			return 1
+		default:
+			if c := strings.Compare(x.key, y.key); c != 0 {
+				return c
+			}
+		}
+	}
+	return cmp.Compare(len(sa), len(sb))
+}
+
+// splitPath reads a path written by joinKey and locationPath back into segments. Paths
+// that do not follow that grammar (the fixed paths of schema locations, which are plain
+// dotted names) split on dots.
+func splitPath(path string) []pathSegment {
+	var segments []pathSegment
+	for i := 0; i < len(path); {
+		switch {
+		case path[i] == '.':
+			i++
+		case path[i] == '[' && i+1 < len(path) && path[i+1] == '"':
+			end := i + 2
+			for end < len(path) && path[end] != '"' {
+				if path[end] == '\\' {
+					end++
+				}
+				end++
+			}
+			var key string
+			if end >= len(path) || json.Unmarshal([]byte(path[i+1:end+1]), &key) != nil {
+				return append(segments, pathSegment{key: path[i:]})
+			}
+			segments = append(segments, pathSegment{key: key})
+			i = end + 2
+		case path[i] == '[':
+			end := strings.IndexByte(path[i:], ']')
+			if end < 0 {
+				return append(segments, pathSegment{key: path[i:]})
+			}
+			if n, err := strconv.Atoi(path[i+1 : i+end]); err == nil {
+				segments = append(segments, pathSegment{index: n, isIndex: true})
+			} else {
+				segments = append(segments, pathSegment{key: path[i+1 : i+end]})
+			}
+			i += end + 1
+		default:
+			end := i
+			for end < len(path) && path[end] != '.' && path[end] != '[' {
+				end++
+			}
+			segments = append(segments, pathSegment{key: path[i:end]})
+			i = end
+		}
+	}
+	return segments
 }
 
 func appendUnique(problems []Problem, p Problem) []Problem {
@@ -404,8 +484,25 @@ func locationPath(prefix string, instance any, location []string) string {
 	return path
 }
 
+// plainKey matches an object key that can follow a dot without ambiguity.
+var plainKey = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// joinKey appends an object key to a problem path. A plain identifier is written after a
+// dot (config.a.b, devices[2].points); any other key, one that contains ".", "[", "]" or a
+// quote, is empty, or starts with a digit, is written in brackets as a JSON string
+// (config["a.b"]), so that the key a.b and the nested keys a and b give different paths.
 func joinKey(path, key string) string {
-	return path + "." + key
+	if plainKey.MatchString(key) {
+		if path == "" {
+			return key
+		}
+		return path + "." + key
+	}
+	var quoted bytes.Buffer
+	enc := json.NewEncoder(&quoted)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(key)
+	return path + "[" + strings.TrimSuffix(quoted.String(), "\n") + "]"
 }
 
 func keywordMessage(k jsonschema.ErrorKind) string {
@@ -431,6 +528,8 @@ func keywordMessage(k jsonschema.ErrorKind) string {
 		return "has duplicate items"
 	case "required", "dependentRequired", "dependencies":
 		return "is missing a required property"
+	case "dependentSchemas":
+		return "does not satisfy a schema that another property requires"
 	}
 	return "does not satisfy schema keyword " + keyword
 }

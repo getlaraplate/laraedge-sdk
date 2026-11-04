@@ -146,21 +146,21 @@ git commit -m "fix(sdk): emit never reports success after the stream's send fail
 - Test: `manifest/*_test.go`
 - Docs: `docs/handshake.md` if it shows a problem path format
 
-- [ ] **Step 1: Write the failing tests** (Review Focus 3):
+- [x] **Step 1: Write the failing tests** (Review Focus 3):
   - a key `a.b` and a key `a[0]` produce different, unambiguous paths (quote such keys, e.g. `config["a.b"]`, the
     form JSON-path readers expect; state the chosen form in the doc comment of the path function);
   - problems at `devices[2]` and `devices[10]` sort in that order;
   - S6: a `dependentSchemas` failure gets a readable message like `dependentRequired`.
 
-- [ ] **Step 2: Implement S5 and S6.**
+- [x] **Step 2: Implement S5 and S6.**
 
-- [ ] **Step 3: S7.** Verify each gap; add the tests that are missing (max depth, local `$ref`, an `http` `$ref`
+- [x] **Step 3: S7.** Verify each gap; add the tests that are missing (max depth, local `$ref`, an `http` `$ref`
   refused, an escaped surrogate pair, a subscribe-only kind refusing `poll`, no value in any message); rename the
   misnamed test; fix the stale comment and the overlong line.
 
-- [ ] **Step 4: Verify**: `go test ./manifest -race -count=1`. Expected: PASS.
+- [x] **Step 4: Verify**: `go test ./manifest -race -count=1`. Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add manifest docs

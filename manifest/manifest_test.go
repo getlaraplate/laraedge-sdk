@@ -2,6 +2,7 @@ package manifest_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -137,6 +138,12 @@ func TestCheck(t *testing.T) {
 		{"external ref refused", func(s string) string {
 			return strings.Replace(s, `"topic": {"type": "string", "maxLength": 8}`, `"topic": {"$ref": "file:///etc/passwd"}`, 1)
 		}, "kinds.output.config_schema"},
+		{"http ref refused", func(s string) string {
+			return strings.Replace(s, `"topic": {"type": "string", "maxLength": 8}`, `"topic": {"$ref": "http://example.com/schema.json"}`, 1)
+		}, "kinds.output.config_schema"},
+		{"local ref is fine", func(s string) string {
+			return strings.Replace(s, `"config_schema": {"type": "object", "properties": {"topic": {"type": "string", "maxLength": 8}}}`, `"config_schema": {"$defs": {"topic": {"type": "string", "maxLength": 8}}, "type": "object", "properties": {"topic": {"$ref": "#/$defs/topic"}}}`, 1)
+		}, ""},
 		{"schema is not an object", func(s string) string {
 			return strings.Replace(s, `"config_schema": {"type": "object", "properties": {"topic": {"type": "string", "maxLength": 8}}}`, `"config_schema": 42`, 1)
 		}, "kinds.output.config_schema"},
@@ -230,7 +237,7 @@ func TestValidateInput(t *testing.T) {
 		{"address fails schema", `{"connection":{"host":"a"},"devices":[{"device":"d","points":[{"signal":"a","address":"db1.0","read":"subscribe"},{"signal":"b","address":"` + marker + `","read":"subscribe"}]}]}`, []string{"devices[0].points[1].address"}},
 		{"address in second device", `{"connection":{"host":"a"},"devices":[{"device":"d","points":[{"signal":"a","address":"db1.0","read":"subscribe"}]},{"device":"e","points":[{"signal":"b","address":"db2.0","read":"subscribe"},{"signal":"c","address":"` + marker + `","read":"subscribe"}]}]}`, []string{"devices[1].points[1].address"}},
 		{"read mode not accepted: event", `{"connection":{"host":"a"},"devices":[{"device":"d","points":[{"signal":"a","address":"db1.0","read":"event"}]}]}`, []string{"devices[0].points[0].read"}},
-		{"read mode not accepted: poll object", `{"connection":{"host":"a"},"devices":[{"device":"d","points":[{"signal":"a","address":"db1.0","read":"subscribe"},{"signal":"b","address":"db1.1","read":{"subscribe":{}}}]}]}`, nil},
+		{"read mode accepted: subscribe object", `{"connection":{"host":"a"},"devices":[{"device":"d","points":[{"signal":"a","address":"db1.0","read":"subscribe"},{"signal":"b","address":"db1.1","read":{"subscribe":{}}}]}]}`, nil},
 		{"type not accepted", `{"connection":{"host":"a"},"devices":[{"device":"d","points":[{"signal":"a","address":"db1.0","read":"subscribe","type":"uint64"}]}]}`, []string{"devices[0].points[0].type"}},
 		{"several at once", `{"connection":{"host":"a","port":0},"devices":[{"device":"d","points":[{"signal":"a","address":"` + marker + `","read":"event","type":"string"}]}]}`, []string{"connection.port", "devices[0].points[0].address", "devices[0].points[0].read", "devices[0].points[0].type"}},
 	}
@@ -402,4 +409,111 @@ func TestLoadAcceptsDifferentlyNamedKeysInsideSchemas(t *testing.T) {
 	if _, _, err := manifest.Load(path); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
+}
+
+func TestProblemPathsAreUnambiguous(t *testing.T) {
+	m := mustManifest(t, `{"name":"x","version":"1","protocol_versions":["v1"],"kinds":{"processor":{"config_schema":{
+	  "type":"object","properties":{
+	    "a.b":{"type":"integer"},
+	    "a":{"type":"object","properties":{"b":{"type":"integer"}}},
+	    "x[0]":{"type":"integer"},
+	    "say \"hi\"":{"type":"integer"},
+	    "":{"type":"integer"}}}}}}`)
+	problems := m.ValidateProcessor(json.RawMessage(`{"config":{"a.b":"v","a":{"b":"v"},"x[0]":"v","say \"hi\"":"v","":"v"}}`))
+	want := []string{`config.a.b`, `config[""]`, `config["a.b"]`, `config["say \"hi\""]`, `config["x[0]"]`}
+	got := paths(problems)
+	if len(problems) != len(want) {
+		t.Fatalf("want %v, got %+v", want, problems)
+	}
+	for _, w := range want {
+		if !got.has(w) {
+			t.Errorf("want path %s, got %+v", w, problems)
+		}
+	}
+}
+
+func TestMissingRequiredKeyPathIsQuoted(t *testing.T) {
+	m := mustManifest(t, `{"name":"x","version":"1","protocol_versions":["v1"],"kinds":{"processor":{"config_schema":{
+	  "type":"object","required":["a.b","plain"]}}}}`)
+	got := paths(m.ValidateProcessor(json.RawMessage(`{"config":{}}`)))
+	if len(got) != 2 || !got.has(`config["a.b"]`) || !got.has("config.plain") {
+		t.Fatalf("%v", got)
+	}
+}
+
+func TestProblemsSortIndexesNumerically(t *testing.T) {
+	m := mustManifest(t, fullManifest)
+	var devices []string
+	for i := 0; i < 12; i++ {
+		devices = append(devices, `{"device":"d","points":[{"signal":"s","address":"`+marker+`","read":"subscribe"}]}`)
+	}
+	section := `{"connection":{"host":"a"},"devices":[` + strings.Join(devices, ",") + `]}`
+	problems := m.ValidateInput(json.RawMessage(section))
+	if len(problems) != 12 {
+		t.Fatalf("want 12 problems, got %+v", problems)
+	}
+	for i, p := range problems {
+		if want := fmt.Sprintf("devices[%d].points[0].address", i); p.Path != want {
+			t.Fatalf("problem %d: path %s, want %s", i, p.Path, want)
+		}
+	}
+}
+
+func TestDependentSchemasHasAReadableMessage(t *testing.T) {
+	m := mustManifest(t, `{"name":"x","version":"1","protocol_versions":["v1"],"kinds":{"processor":{"config_schema":{
+	  "type":"object","dependentSchemas":{"credit":false}}}}}`)
+	problems := m.ValidateProcessor(json.RawMessage(`{"config":{"credit":"` + marker + `"}}`))
+	assertNoValue(t, problems)
+	if len(problems) == 0 {
+		t.Fatal("want a problem")
+	}
+	for _, p := range problems {
+		if strings.Contains(p.Message, "dependentSchemas") {
+			t.Errorf("message is not readable: %+v", p)
+		}
+	}
+	t.Logf("%+v", problems)
+}
+
+func TestValidateLocalRefAndSubscribeOnlyKind(t *testing.T) {
+	m := mustManifest(t, `{"name":"x","version":"1","protocol_versions":["v1"],"kinds":{
+	  "output":{"config_schema":{"$defs":{"topic":{"type":"string","maxLength":2}},"type":"object","properties":{"topic":{"$ref":"#/$defs/topic"}}}},
+	  "input":{"connection_schema":{"type":"object"},"address_schema":{"type":"string"},"read_modes":["subscribe"],"types":["bool"]}}}`)
+
+	problems := m.ValidateOutput(json.RawMessage(`{"config":{"topic":"` + marker + `"}}`))
+	assertNoValue(t, problems)
+	if got := paths(problems); len(got) != 1 || !got.has("config.topic") {
+		t.Fatalf("local ref: %+v", problems)
+	}
+
+	const point = `{"connection":{},"devices":[{"device":"d","points":[{"signal":"s","address":"a","read":%s}]}]}`
+	for read, wantProblem := range map[string]bool{
+		`"poll"`: true, `{"poll":"1s"}`: true, `"event"`: true,
+		`"subscribe"`: false, `{"subscribe":{}}`: false,
+	} {
+		problems := m.ValidateInput(json.RawMessage(fmt.Sprintf(point, read)))
+		if wantProblem != (len(problems) == 1 && problems[0].Path == "devices[0].points[0].read") {
+			t.Errorf("read %s: want problem %v, got %+v", read, wantProblem, problems)
+		}
+	}
+}
+
+func TestNoConfigValueInAnyMessage(t *testing.T) {
+	m := mustManifest(t, `{"name":"x","version":"1","protocol_versions":["v1"],"kinds":{"processor":{"config_schema":{
+	  "type":"object",
+	  "properties":{
+	    "t":{"type":"integer"},"e":{"enum":["a"]},"c":{"const":"a"},"p":{"type":"string","pattern":"^a$"},
+	    "l":{"type":"string","maxLength":1},"n":{"type":"integer","maximum":1},"m":{"type":"integer","multipleOf":7},
+	    "u":{"type":"array","uniqueItems":true},"i":{"type":"array","maxItems":1},"k":{"type":"object","additionalProperties":false},
+	    "d":{"type":"object","dependentRequired":{"x":["y"]},"dependentSchemas":{"x":{"required":["z"]}}},
+	    "f":{"not":{}}
+	  }}}}}`)
+	section := `{"config":{"t":"` + marker + `","e":"` + marker + `","c":"` + marker + `","p":"` + marker + `",
+	  "l":"` + marker + `","n":1000,"m":8,"u":["` + marker + `","` + marker + `"],"i":["` + marker + `","` + marker + `"],
+	  "k":{"extra":"` + marker + `"},"d":{"x":"` + marker + `"},"f":"` + marker + `"}}`
+	problems := m.ValidateProcessor(json.RawMessage(section))
+	if len(problems) < 10 {
+		t.Fatalf("want many problems, got %+v", problems)
+	}
+	assertNoValue(t, problems)
 }
