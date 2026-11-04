@@ -84,5 +84,7 @@ a switch for trying the behaviour of the agent without a real destination. A lin
 fsync failed may already be on disk: the next append first truncates the file back to its size
 before that line, so the agent's resend of the batch is stored once, and while the truncation fails
 it answers `RETRY_AFTER` without writing. Qualities, priorities and event kinds are written as words
-chosen by the constants of the SDK, not by their order. The path of `conformance.json` is relative,
-so a run that sends batches writes it in the working directory of the plugin.
+chosen by the constants of the SDK, not by their order. Instances configured with the same file
+share one lock and one set of message ids, so their lines never overwrite each other. The path of
+`conformance.json` is relative, so a run that sends batches writes it in the working directory of
+the plugin.

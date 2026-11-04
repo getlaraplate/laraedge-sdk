@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -545,5 +547,55 @@ func TestBadQualityAndDeathAreWords(t *testing.T) {
 	}
 	if got := line.Records[1].Event; got == nil || got.Kind != "death" {
 		t.Errorf("event = %+v, want kind death", got)
+	}
+}
+
+func TestInstancesSharingAFileKeepEveryAcceptedLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out.jsonl")
+	s := newSink()
+	for _, id := range []string{"a", "b"} {
+		if errs := s.Configure(context.Background(), id, configSection(path)); len(errs) > 0 {
+			t.Fatal(errs)
+		}
+	}
+	const perSender = 50
+	var (
+		mu       sync.Mutex
+		accepted []string
+		wg       sync.WaitGroup
+	)
+	for _, instance := range []string{"a", "b"} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for n := range perSender {
+				id := fmt.Sprintf("%s-%d", instance, n)
+				if o := s.Send(context.Background(), instance, batch(id, uint64(n+1), sampleRecord("d", 1))); o.Kind == sdk.OutcomeAccepted {
+					mu.Lock()
+					accepted = append(accepted, id)
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() { // reconfigures an instance while its sends run
+		defer wg.Done()
+		for range perSender {
+			if errs := s.Configure(context.Background(), "a", configSection(path)); len(errs) > 0 {
+				t.Error(errs)
+				return
+			}
+		}
+	}()
+	wg.Wait()
+	if len(accepted) != 2*perSender {
+		t.Fatalf("%d sends accepted, want %d", len(accepted), 2*perSender)
+	}
+	got := messageIDs(t, path)
+	slices.Sort(got)
+	slices.Sort(accepted)
+	if !slices.Equal(got, accepted) {
+		t.Errorf("file holds %d lines, want each of the %d accepted ids exactly once", len(got), len(accepted))
 	}
 }
