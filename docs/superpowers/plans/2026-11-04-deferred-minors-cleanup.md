@@ -198,20 +198,20 @@ git commit -m "feat(conformance): enforce retry_after, reason and one Process st
   names it
 - Test: the examples' tests
 
-- [ ] **Step 1: S11.** `waitForTickers` waits on a signal from the example's clock (a channel the fake clock closes
+- [x] **Step 1: S11.** `waitForTickers` waits on a signal from the example's clock (a channel the fake clock closes
   when a ticker is registered, or the SDK test clock's equivalent), not on a sleep loop.
 
-- [ ] **Step 2: S12.** Verify each sub-item, then:
+- [x] **Step 2: S12.** Verify each sub-item, then:
   - a failed `Sync` after a good `Write`: answer `RETRY_AFTER` and truncate back to the last synced offset before
     the next write, so a resend cannot duplicate the line; test with a failing file;
   - fsync the parent directory after creating the file;
   - the jsonl enum words switch on the constants, not on `iota` order; test `bad` and `death`;
   - the other sub-items: fix or record the decision in the example's README.
 
-- [ ] **Step 3: Verify** (Review Focus 5): `go test ./examples/... -race -count=20`, and the conformance command on
+- [x] **Step 3: Verify** (Review Focus 5): `go test ./examples/... -race -count=20`, and the conformance command on
   each example. Expected: PASS.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add examples
