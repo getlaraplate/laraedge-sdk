@@ -269,8 +269,10 @@ func TestEachDefectFailsItsCheck(t *testing.T) {
 			skipped: []string{"output.duplicate"},
 		},
 		{
-			// RETRY_AFTER may come without retry_after (the agent uses its own backoff): output.send
-			// passes, and only output.duplicate fails, since RETRY_AFTER does not store the batch.
+			// RETRY_AFTER may come without retry_after (the agent uses its own backoff): the case pins
+			// that output.send passes for a bare RETRY_AFTER. output.duplicate fails for any plugin
+			// that answers RETRY_AFTER on both sends, with or without retry_after, since RETRY_AFTER
+			// does not store the batch.
 			name: "RETRY_AFTER without retry_after", env: "BROKEN_RETRY_AFTER_BARE=1", failing: "output.duplicate",
 			detail: "RETRY_AFTER, then RETRY_AFTER",
 		},
