@@ -221,9 +221,9 @@ An input instance has at most one `Subscribe` stream, and a processor instance a
 is open, a second one for the same instance is refused with the gRPC status `ALREADY_EXISTS`. A plugin that wants
 parallel streams needs separate instances. A stream whose client has already cancelled it when the plugin starts
 serving it is refused with that cancellation (`CANCELLED` or `DEADLINE_EXCEEDED`) and never holds the instance, so
-a host that closes a stream and opens a new one is not refused by its own old stream. The conformance check `input.stream` verifies the rule for inputs and
-that a new stream is served once the first was cancelled, which proves that the first one ended; the `Process` rule
-is written in `processor.proto` and is not probed by the suite.
+a host that closes a stream and opens a new one is not refused by its own old stream. The conformance check
+`input.stream` verifies the rule for inputs and that a new stream is served once the first was cancelled, which
+proves that the first one ended; the check `processor.signals` verifies the rule for processors.
 
 ### Behaviour of the Go SDK
 
@@ -432,8 +432,8 @@ What each check requires, in report order:
 | `<kind>.configure` | Every section is configured on its own instance, within 10 s. Every valid section is accepted (no errors in the response and no RPC error). Every invalid section is answered with at least one configuration error (an RPC error fails the check). The checks that follow need the first valid section to be accepted. |
 | `input.stream` | `Subscribe` on the first valid instance delivers an event (of any kind) within the timeout. While it is open, a second `Subscribe` of the same instance must be refused with an error (the protocol says `ALREADY_EXISTS`, and the suite reports the code it saw; a second stream that is served, or that ends OK without an event, fails). After the first stream is cancelled, a new `Subscribe` of the instance is served with an event within the timeout (retried every 50 ms), which proves that the first one ended. |
 | `input.probe` | `Probe` answers within 30 s with exactly one sample for each `(device, signal)` point of the first valid section, and no sample for any other pair. |
-| `processor.signals` | The first valid section must observe at least one device and declare at least one signal. The suite opens one `Process` stream, sends `start`, the records and then closes its side; the processor must emit at least one sample before the timeout, every sample must be of a declared `(device, signal)` pair, and the stream must not fail or end before the records were sent. The processor should end its stream when the agent closes its side. |
-| `output.send` | `Send` of one valid batch (one sample record, `source_seq` 1, a UUIDv7 `message_id`) answers within 30 s with one of the six outcomes. Which one is not judged. |
-| `output.duplicate` | The same batch sent twice (same `message_id`) is answered `ACCEPTED` or `DUPLICATE` both times. Not run when the first `Send` returned an error. |
+| `processor.signals` | The first valid section must observe at least one device and declare at least one signal. The suite opens one `Process` stream, sends `start`, the records and then closes its side; the processor must emit at least one sample before the timeout, every sample must be of a declared `(device, signal)` pair, and the stream must not fail or end before the records were sent. While the first stream is open, after its first sample (at most half the timeout is waited for one), a second `Process` stream of the same instance must be refused with `ALREADY_EXISTS`; one that is served, or not refused within half the timeout, or refused with another code fails. The processor should end its stream when the agent closes its side. |
+| `output.send` | `Send` of one valid batch (one sample record, `source_seq` 1, a UUIDv7 `message_id`) answers within 30 s with one of the six outcomes. Which one is not judged, but `RETRY_AFTER` must carry `retry_after` and `REJECT_INVALID` a non-empty `reason`, as the outcomes above require. |
+| `output.duplicate` | The same batch sent twice (same `message_id`) is answered `ACCEPTED` or `DUPLICATE` both times. Not run when the first `Send` returned an error or broke the rule above. |
 | `shutdown` | A health `Check` still answers; then `Shutdown` with a 5 s deadline (an `UNAVAILABLE` answer or EOF counts as an answer) and the plugin exits with code 0 within 5 s plus 1 s. |
 | `restart` | After a `kill -9`, a new launch with the same socket directory performs a new handshake on a different address; on Unix the old socket file is gone afterwards, removed by the host as a leftover `*.sock` file. |

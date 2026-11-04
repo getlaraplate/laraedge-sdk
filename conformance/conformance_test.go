@@ -265,6 +265,18 @@ func TestEachDefectFailsItsCheck(t *testing.T) {
 			name: "Send fails with an error", env: "BROKEN_SEND_ERROR=1", failing: "output.send",
 			skipped: []string{"output.duplicate"},
 		},
+		{
+			name: "RETRY_AFTER without retry_after", env: "BROKEN_RETRY_AFTER_BARE=1", failing: "output.send",
+			skipped: []string{"output.duplicate"}, detail: "RETRY_AFTER",
+		},
+		{
+			name: "REJECT_INVALID without a reason", env: "BROKEN_REJECT_BARE=1", failing: "output.send",
+			skipped: []string{"output.duplicate"}, detail: "REJECT_INVALID",
+		},
+		{
+			name: "second concurrent Process stream served", env: "BROKEN_CONCURRENT_PROCESS=1", failing: "processor.signals",
+			detail: "ALREADY_EXISTS",
+		},
 		{name: "Shutdown past its deadline", env: "BROKEN_SLOW_SHUTDOWN=1", failing: "shutdown", detail: "still running"},
 		{
 			name: "plugin gone before Shutdown", env: "BROKEN_EXIT_BEFORE_SHUTDOWN=1", failing: "shutdown",
@@ -458,6 +470,11 @@ func TestProcessorRecordsFromTheFixture(t *testing.T) {
 			records: `[{"sample": {"device": "machine-1", "signal": "count", "value": {"int": 1, "bool": true}}}]`,
 			failing: "fixtures", skipped: processorChecks,
 			detail: "processor.valid[0].records[0]: sample.value: must hold exactly one of int, float, bool and string",
+		},
+		{
+			name:    "records null",
+			records: `null`,
+			failing: "fixtures", skipped: processorChecks, detail: "records must be a list",
 		},
 		{
 			name:    "unknown member in a record",

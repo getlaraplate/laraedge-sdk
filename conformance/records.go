@@ -82,6 +82,9 @@ func splitRecords(section json.RawMessage) (json.RawMessage, []fixtureRecord, er
 	if err != nil {
 		return nil, nil, err
 	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, nil, errors.New("records must be a list")
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	var records []fixtureRecord

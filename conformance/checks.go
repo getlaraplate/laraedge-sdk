@@ -428,8 +428,9 @@ func (s *suite) checkInputProbe(sess *session, instance string) {
 }
 
 // checkProcessorSignals feeds the processor the records of the first valid fixture, or synthetic
-// records when it has none (see syntheticRecords), ends its side of the stream and collects the
-// samples until the stream ends or the timeout passes. The suite opens one Process stream only.
+// records when it has none (see syntheticRecords). While that stream is open it probes a second
+// stream of the instance, which must be refused with ALREADY_EXISTS. Then it ends its side of the
+// first stream and collects the samples until the stream ends or the timeout passes.
 func (s *suite) checkProcessorSignals(sess *session, instance string) {
 	const name = "processor.signals"
 	cfg, err := sdk.DecodeProcessor(s.fixtures.Processor.Valid[0])
@@ -479,6 +480,7 @@ func (s *suite) checkProcessorSignals(sess *session, instance string) {
 		err     error
 	}
 	collected := make(chan result, 1)
+	firstSample := make(chan struct{})
 	go func() {
 		var r result
 		for {
@@ -490,11 +492,28 @@ func (s *suite) checkProcessorSignals(sess *session, instance string) {
 				collected <- r
 				return
 			}
+			if len(r.samples) == 0 {
+				close(firstSample)
+			}
 			r.samples = append(r.samples, out.GetSample())
 		}
 	}()
 
 	sendErr := sendRecords(stream, instance, records)
+	// The first stream is still open: its sample proves the plugin serves it, so a second stream of
+	// the instance must now be refused. A processor that answers only at the end of its input
+	// gets half the timeout, then the second stream is tried anyway.
+	wait := time.NewTimer(s.timeout / 2)
+	select {
+	case <-firstSample:
+	case <-wait.C:
+	case <-s.ctx.Done():
+	}
+	wait.Stop()
+	secondErr := s.refusedSecondProcess(sess, instance)
+	if sendErr == nil {
+		sendErr = stream.CloseSend()
+	}
 	r := <-collected
 	var problems []string
 	for _, sample := range r.samples {
@@ -506,6 +525,10 @@ func (s *suite) checkProcessorSignals(sess *session, instance string) {
 	slices.Sort(problems)
 	problems = slices.Compact(problems)
 	nothing := "so nothing could be checked"
+	if secondErr != "" && len(problems) == 0 && r.err == nil && sendErr == nil && len(r.samples) > 0 {
+		s.fail(name, "%s", secondErr)
+		return
+	}
 	if s.processorRecords == nil {
 		nothing += `; add a "records" list to the first valid processor fixture of conformance.json with records ` +
 			"the processor answers"
@@ -528,7 +551,32 @@ func (s *suite) checkProcessorSignals(sess *session, instance string) {
 	}
 }
 
-// sendRecords starts the stream on the instance, sends the records and ends its side.
+// refusedSecondProcess opens a second Process stream of the instance while the first one is
+// open and returns what is wrong with its answer, empty when it was refused with ALREADY_EXISTS.
+func (s *suite) refusedSecondProcess(sess *session, instance string) string {
+	ctx, cancel := context.WithTimeout(s.ctx, s.timeout/2)
+	defer cancel()
+	stream, err := pb.NewProcessorClient(sess.conn).Process(ctx)
+	if err == nil {
+		// A refusal may reach the client before or after the start message; Recv tells it either way.
+		_ = stream.Send(&pb.ProcessorIn{Msg: &pb.ProcessorIn_Start{Start: &pb.ProcessStart{InstanceId: instance}}})
+		_, err = stream.Recv()
+	}
+	const rule = "the protocol allows one Process stream per processor instance and refuses another with ALREADY_EXISTS"
+	switch code := status.Code(err); {
+	case err == nil:
+		return "a second Process stream of the instance was served while the first was open; " + rule
+	case code == codes.AlreadyExists:
+		return ""
+	case code == codes.DeadlineExceeded || code == codes.Canceled:
+		return fmt.Sprintf("a second Process stream of the instance, opened while the first was open, was not refused "+
+			"within %v; %s", s.timeout/2, rule)
+	default:
+		return fmt.Sprintf("a second Process stream of the instance was refused with %s (%v); %s", code, err, rule)
+	}
+}
+
+// sendRecords starts the stream on the instance and sends the records. The caller ends its side.
 func sendRecords(stream pb.Processor_ProcessClient, instance string, records []*pb.Record) error {
 	err := stream.Send(&pb.ProcessorIn{Msg: &pb.ProcessorIn_Start{Start: &pb.ProcessStart{InstanceId: instance}}})
 	if err != nil {
@@ -539,7 +587,7 @@ func sendRecords(stream pb.Processor_ProcessClient, instance string, records []*
 			return err
 		}
 	}
-	return stream.CloseSend()
+	return nil
 }
 
 // checkOutputSend sends one small valid batch twice under the same message_id: the first answer
@@ -570,6 +618,14 @@ func (s *suite) checkOutputSend(sess *session, instance string) {
 		return
 	case first.GetOutcome() == pb.Outcome_OUTCOME_UNSPECIFIED || pb.Outcome_name[int32(first.GetOutcome())] == "":
 		s.fail("output.send", "Send answered the outcome %d, which is not one of the six", first.GetOutcome())
+	case first.GetOutcome() == pb.Outcome_OUTCOME_RETRY_AFTER && first.GetRetryAfter() == nil:
+		s.fail("output.send", "Send answered RETRY_AFTER without retry_after; the protocol says RETRY_AFTER comes \"with `retry_after`\"")
+		s.notRun("the first Send broke an outcome rule", "output.duplicate")
+		return
+	case first.GetOutcome() == pb.Outcome_OUTCOME_REJECT_INVALID && first.GetReason() == "":
+		s.fail("output.send", "Send answered REJECT_INVALID without a reason; the protocol says REJECT_INVALID comes \"with `reason`\"")
+		s.notRun("the first Send broke an outcome rule", "output.duplicate")
+		return
 	default:
 		s.pass("output.send", "%s", outcomeName(first.GetOutcome()))
 	}

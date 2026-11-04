@@ -20,6 +20,10 @@
 //	                            nothing
 //	BROKEN_CONCURRENT_STREAMS=1 a second stream of an input instance is served, not refused
 //	BROKEN_SEND_ERROR=1         every Send fails with an error
+//	BROKEN_RETRY_AFTER_BARE=1   every Send answers RETRY_AFTER without retry_after
+//	BROKEN_REJECT_BARE=1        every Send answers REJECT_INVALID without a reason
+//	BROKEN_CONCURRENT_PROCESS=1 a second Process stream of a processor instance is served, not
+//	                            refused
 //	BROKEN_EXIT_BEFORE_SHUTDOWN=1 after answering DUPLICATE, exit 0 at the next call, unanswered
 //
 // A section is valid unless it has the top-level member "refuse": true. A section with a
@@ -101,7 +105,7 @@ type plugin struct {
 
 	mu       sync.Mutex
 	sections map[string]json.RawMessage // key: kind + "/" + instance
-	active   map[string]bool            // input instances with a running stream
+	active   map[string]bool            // key: kind + "/" + instance, with a running stream
 	seen     map[string]bool            // output instance + "/" + message_id
 
 	shutdownOnce sync.Once
@@ -151,6 +155,23 @@ func (p *plugin) configure(kind string, req *pb.ConfigureRequest) (*pb.Configure
 	}
 	p.sections[kind+"/"+id] = append(json.RawMessage(nil), req.GetConfig()...)
 	return &pb.ConfigureResponse{}, nil
+}
+
+// claimStream marks the instance as streaming. Another stream of the instance is refused with
+// ALREADY_EXISTS unless shared. The returned function releases the claim.
+func (p *plugin) claimStream(kind, id string, shared bool) (release func(), err error) {
+	key := kind + "/" + id
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.active[key] && !shared {
+		return nil, status.Error(codes.AlreadyExists, "the instance already has a running stream")
+	}
+	p.active[key] = true
+	return func() {
+		p.mu.Lock()
+		delete(p.active, key)
+		p.mu.Unlock()
+	}, nil
 }
 
 func (p *plugin) section(kind, id string) (json.RawMessage, error) {
@@ -249,18 +270,11 @@ func (s *inputService) Subscribe(req *pb.SubscribeRequest, stream pb.Input_Subsc
 	if err != nil {
 		return err
 	}
-	s.p.mu.Lock()
-	if s.p.active[id] && !defect("BROKEN_CONCURRENT_STREAMS") {
-		s.p.mu.Unlock()
-		return status.Error(codes.AlreadyExists, "the instance already has a running stream")
+	release, err := s.p.claimStream("input", id, defect("BROKEN_CONCURRENT_STREAMS"))
+	if err != nil {
+		return err
 	}
-	s.p.active[id] = true
-	s.p.mu.Unlock()
-	defer func() {
-		s.p.mu.Lock()
-		delete(s.p.active, id)
-		s.p.mu.Unlock()
-	}()
+	defer release()
 
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
@@ -322,6 +336,11 @@ func (s *processorService) Process(stream pb.Processor_ProcessServer) error {
 	if err != nil {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	}
+	release, err := s.p.claimStream("processor", first.GetStart().GetInstanceId(), defect("BROKEN_CONCURRENT_PROCESS"))
+	if err != nil {
+		return err
+	}
+	defer release()
 	for {
 		msg, err := stream.Recv()
 		if err == io.EOF {
@@ -365,6 +384,12 @@ func (s *outputService) Send(_ context.Context, req *pb.SendRequest) (*pb.SendRe
 	}
 	if defect("BROKEN_SEND_ERROR") {
 		return nil, status.Error(codes.Unavailable, "the destination is down")
+	}
+	if defect("BROKEN_RETRY_AFTER_BARE") {
+		return &pb.SendResult{Outcome: pb.Outcome_OUTCOME_RETRY_AFTER}, nil
+	}
+	if defect("BROKEN_REJECT_BARE") {
+		return &pb.SendResult{Outcome: pb.Outcome_OUTCOME_REJECT_INVALID}, nil
 	}
 	key := id + "/" + req.GetBatch().GetMessageId()
 	s.p.mu.Lock()

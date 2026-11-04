@@ -174,17 +174,17 @@ git commit -m "fix(manifest): unambiguous problem paths, natural order, dependen
 - Test: `conformance/*_test.go`, `conformance/testdata/broken/` (a behaviour per new refusal)
 - Docs: `docs/handshake.md` (the conformance section lists the checks)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   - S8 (Review Focus 4): the broken test plugin answers `RETRY_AFTER` without `retry_after`, then `REJECT_INVALID`
     without `reason`; conformance fails each with a message naming the rule.
   - S9: `"records": null` reports `records must be a list`.
   - S10 (if not probed): a second `Process` stream on the same instance must be refused `ALREADY_EXISTS`; the broken
     plugin that accepts it fails conformance.
 
-- [ ] **Step 2: Implement**, then `go test ./conformance -race -count=1`, and run the conformance command against the
+- [x] **Step 2: Implement**, then `go test ./conformance -race -count=1`, and run the conformance command against the
   three examples (the command CI runs). Expected: PASS for the examples, the broken plugin refused for each new rule.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add conformance docs
