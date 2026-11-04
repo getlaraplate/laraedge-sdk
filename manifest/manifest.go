@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/santhosh-tekuri/jsonschema/v6/kind"
@@ -484,15 +485,27 @@ func locationPath(prefix string, instance any, location []string) string {
 	return path
 }
 
-// plainKey matches an object key that can follow a dot without ambiguity.
-var plainKey = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+// isPlainKey reports whether an object key can follow a dot without ambiguity: it is not
+// empty and holds none of ".", "[", "]", a double quote, whitespace or a control character.
+func isPlainKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for _, r := range key {
+		if r == '.' || r == '[' || r == ']' || r == '"' || unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
 
-// joinKey appends an object key to a problem path. A plain identifier is written after a
-// dot (config.a.b, devices[2].points); any other key, one that contains ".", "[", "]" or a
-// quote, is empty, or starts with a digit, is written in brackets as a JSON string
-// (config["a.b"]), so that the key a.b and the nested keys a and b give different paths.
+// joinKey appends an object key to a problem path. A plain key is written after a dot
+// (config.a.b, config.read-timeout, devices[2].points); a key that is empty or holds ".",
+// "[", "]", a double quote, whitespace or a control character is written in brackets as a
+// JSON string (config["a.b"]), so that the key a.b and the nested keys a and b give
+// different paths.
 func joinKey(path, key string) string {
-	if plainKey.MatchString(key) {
+	if isPlainKey(key) {
 		if path == "" {
 			return key
 		}

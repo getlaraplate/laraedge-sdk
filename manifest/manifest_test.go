@@ -418,9 +418,12 @@ func TestProblemPathsAreUnambiguous(t *testing.T) {
 	    "a":{"type":"object","properties":{"b":{"type":"integer"}}},
 	    "x[0]":{"type":"integer"},
 	    "say \"hi\"":{"type":"integer"},
+	    "read-timeout":{"type":"integer"},
+	    "1st":{"type":"integer"},
+	    "two words":{"type":"integer"},
 	    "":{"type":"integer"}}}}}}`)
-	problems := m.ValidateProcessor(json.RawMessage(`{"config":{"a.b":"v","a":{"b":"v"},"x[0]":"v","say \"hi\"":"v","":"v"}}`))
-	want := []string{`config.a.b`, `config[""]`, `config["a.b"]`, `config["say \"hi\""]`, `config["x[0]"]`}
+	problems := m.ValidateProcessor(json.RawMessage(`{"config":{"a.b":"v","a":{"b":"v"},"x[0]":"v","say \"hi\"":"v","":"v","read-timeout":"v","1st":"v","two words":"v"}}`))
+	want := []string{`config.a.b`, `config[""]`, `config["a.b"]`, `config["say \"hi\""]`, `config["x[0]"]`, `config.read-timeout`, `config.1st`, `config["two words"]`}
 	got := paths(problems)
 	if len(problems) != len(want) {
 		t.Fatalf("want %v, got %+v", want, problems)

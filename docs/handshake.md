@@ -182,7 +182,7 @@ running `Subscribe` or `Process` stream and waits for it to end before calling t
 - Output: `id` and `config` (free object).
 
 A non-empty `ConfigureResponse.errors` means the configuration is refused; each entry is a `path` such as
-`devices[0].points[1].address` (a key that is not a plain identifier, such as `a.b`, is written as `config["a.b"]`) and a `message`, and never contains a value, because values can be secrets. A refusal
+`devices[0].points[1].address` (a key that is empty or contains `.`, `[`, `]`, a quote or whitespace, such as `a.b`, is written as `config["a.b"]`) and a `message`, and never contains a value, because values can be secrets. A refusal
 is an answer, not an RPC error: an RPC error from `Configure` is a failure of the plugin. Go plugins decode the
 section with `sdk.DecodeInput`, `sdk.DecodeProcessor` and `sdk.DecodeOutput`, which ignore the keys they do not know
 so that a newer agent can add some; do likewise.
