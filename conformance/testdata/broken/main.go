@@ -30,6 +30,8 @@
 //	                            of value 3, the last of the suite's synthetic records
 //	BROKEN_CONCURRENT_PROCESS=1 a second Process stream of a processor instance is served, not
 //	                            refused
+//	BROKEN_NEWEST_WINS=1        a new Process stream of a processor instance ends the running one
+//	                            with OK and is served in its place
 //	BROKEN_EXIT_BEFORE_SHUTDOWN=1 after answering DUPLICATE, exit 0 at the next call, unanswered
 //
 // A section is valid unless it has the top-level member "refuse": true. A section with a
@@ -118,6 +120,7 @@ type plugin struct {
 	mu       sync.Mutex
 	sections map[string]json.RawMessage // key: kind + "/" + instance
 	active   map[string]bool            // key: kind + "/" + instance, with a running stream
+	newest   map[string]chan struct{}   // BROKEN_NEWEST_WINS: closed when a newer stream replaces it
 	seen     map[string]bool            // output instance + "/" + message_id
 
 	shutdownOnce sync.Once
@@ -138,6 +141,7 @@ func newPlugin() *plugin {
 	return &plugin{
 		sections: map[string]json.RawMessage{},
 		active:   map[string]bool{},
+		newest:   map[string]chan struct{}{},
 		seen:     map[string]bool{},
 		shutdown: make(chan struct{}),
 	}
@@ -167,6 +171,20 @@ func (p *plugin) configure(kind string, req *pb.ConfigureRequest) (*pb.Configure
 	}
 	p.sections[kind+"/"+id] = append(json.RawMessage(nil), req.GetConfig()...)
 	return &pb.ConfigureResponse{}, nil
+}
+
+// replaceStream makes the caller the running stream of the instance and ends the one it
+// replaces: the returned channel is closed when a newer stream replaces the caller.
+func (p *plugin) replaceStream(kind, id string) <-chan struct{} {
+	key := kind + "/" + id
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if replaced, ok := p.newest[key]; ok {
+		close(replaced)
+	}
+	replaced := make(chan struct{})
+	p.newest[key] = replaced
+	return replaced
 }
 
 // claimStream marks the instance as streaming. Another stream of the instance is refused with
@@ -348,6 +366,17 @@ func (s *processorService) Process(stream pb.Processor_ProcessServer) error {
 	if err != nil {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	}
+	if defect("BROKEN_NEWEST_WINS") {
+		replaced := s.p.replaceStream("processor", first.GetStart().GetInstanceId())
+		answered := make(chan error, 1)
+		go func() { answered <- s.answer(stream, cfg) }()
+		select {
+		case err := <-answered:
+			return err
+		case <-replaced:
+			return nil
+		}
+	}
 	release, err := s.p.claimStream("processor", first.GetStart().GetInstanceId(), defect("BROKEN_CONCURRENT_PROCESS"))
 	if err != nil {
 		return err
@@ -357,6 +386,12 @@ func (s *processorService) Process(stream pb.Processor_ProcessServer) error {
 		<-stream.Context().Done()
 		return stream.Context().Err()
 	}
+	return s.answer(stream, cfg)
+}
+
+// answer reads the records of a started Process stream and answers them until the client ends
+// its side.
+func (s *processorService) answer(stream pb.Processor_ProcessServer, cfg sdk.ProcessorConfig) error {
 	for {
 		msg, err := stream.Recv()
 		if err == io.EOF {

@@ -576,52 +576,115 @@ func (s *suite) checkProcessorSignals(sess *session, instance string) {
 	}
 }
 
-// endedGrace is how long a second Process stream that was not refused waits for the first stream
-// to be seen ended. The plugin ends the first stream before it serves the second one, and both
-// travel on one connection, so the end is already on its way when the second answer arrives.
+// endedGrace is how long the probe waits to see the first stream ended once a second stream was
+// not refused. The plugin may end the first stream on its own just before it serves the second
+// one, and both travel on one connection, so such an end is already on its way when the second
+// answer arrives. An end seen within the grace is told apart from a newest-wins processor, which
+// ends the first stream because of the second, by one more stream (see refusedSecondProcess).
 const endedGrace = 250 * time.Millisecond
 
 // refusedSecondProcess opens a second Process stream of the instance while the first one is
 // open and returns what is wrong with its answer, empty when it was refused with ALREADY_EXISTS.
-// ended is closed when the first stream ended; probed is false when it ended before the probe
-// could tell anything, since a second stream is then rightly served.
+// ended is closed when the first stream ended. probed is false only when the first stream had
+// ended on its own: already when the probe started, or before a second stream that the plugin then
+// rightly served, which a third stream refused while the second is open proves. A second stream
+// served while the first ends, followed by a third stream that is not refused, is a processor
+// that replaces its running stream with the newest one: that breaks the rule.
 func (s *suite) refusedSecondProcess(sess *session, instance string, ended <-chan struct{}) (problem string, probed bool) {
 	select {
 	case <-ended:
 		return "", false
 	default:
 	}
-	ctx, cancel := context.WithTimeout(s.ctx, s.timeout/2)
+	ctx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
-	stream, err := pb.NewProcessorClient(sess.conn).Process(ctx)
-	if err == nil {
-		// A refusal may reach the client before or after the start message; Recv tells it either way.
-		_ = stream.Send(&pb.ProcessorIn{Msg: &pb.ProcessorIn_Start{Start: &pb.ProcessStart{InstanceId: instance}}})
-		_, err = stream.Recv()
-	}
+	const rule = "the protocol allows one Process stream per processor instance and refuses another with ALREADY_EXISTS"
+	second := probeProcess(ctx, sess, instance)
+	err, answered := s.awaitProbe(second)
 	code := status.Code(err)
-	if code == codes.AlreadyExists {
+	if answered && code == codes.AlreadyExists {
 		return "", true
 	}
 	if s.ctx.Err() != nil {
 		return fmt.Sprintf("the run was interrupted while a second Process stream was probed: %v", s.ctx.Err()), true
 	}
+	firstEnded := false
 	grace := time.NewTimer(endedGrace)
 	defer grace.Stop()
 	select {
 	case <-ended:
-		return "", false
+		firstEnded = true
 	case <-grace.C:
 	}
-	const rule = "the protocol allows one Process stream per processor instance and refuses another with ALREADY_EXISTS"
 	switch {
-	case err == nil:
-		return "a second Process stream of the instance was served while the first was open; " + rule, true
-	case code == codes.DeadlineExceeded || code == codes.Canceled:
+	case firstEnded && answered && err != nil:
+		// The second stream is gone, so no third one can tell why the first ended; a stream refused
+		// with another code was not served next to the first one.
+		return "", false
+	case firstEnded:
+		// The second stream was served and is still open. A processor that ended the first stream
+		// on its own refuses a third one; a newest-wins processor serves it in place of the second.
+		third := probeProcess(ctx, sess, instance)
+		var thirdErr error
+		thirdAnswered := false
+		if !answered {
+			wait := time.NewTimer(s.timeout / 2)
+			select {
+			case thirdErr = <-third:
+				thirdAnswered = true
+			case <-second:
+				// The second stream ended once the third was opened: it was replaced.
+			case <-wait.C:
+			}
+			wait.Stop()
+		} else {
+			thirdErr, thirdAnswered = s.awaitProbe(third)
+		}
+		if thirdAnswered && status.Code(thirdErr) == codes.AlreadyExists {
+			return "", false
+		}
+		if s.ctx.Err() != nil {
+			return fmt.Sprintf("the run was interrupted while a second Process stream was probed: %v", s.ctx.Err()), true
+		}
+		return "a second Process stream of the instance was served while the first was open, the first then ended, " +
+			"and a third stream was served in place of the second: a new stream must not replace the running one; " +
+			rule, true
+	case !answered:
 		return fmt.Sprintf("a second Process stream of the instance, opened while the first was open, was not refused "+
 			"within %v; %s", s.timeout/2, rule), true
+	case err == nil:
+		return "a second Process stream of the instance was served while the first was open; " + rule, true
 	default:
 		return fmt.Sprintf("a second Process stream of the instance was refused with %s (%v); %s", code, err, rule), true
+	}
+}
+
+// probeProcess opens a Process stream of the instance on ctx, sends its start and delivers what
+// its first Recv gives: nil when the stream was served a message, else the error that ended it.
+func probeProcess(ctx context.Context, sess *session, instance string) <-chan error {
+	answer := make(chan error, 1)
+	go func() {
+		stream, err := pb.NewProcessorClient(sess.conn).Process(ctx)
+		if err == nil {
+			// A refusal may reach the client before or after the start message; Recv tells it either way.
+			_ = stream.Send(&pb.ProcessorIn{Msg: &pb.ProcessorIn_Start{Start: &pb.ProcessStart{InstanceId: instance}}})
+			_, err = stream.Recv()
+		}
+		answer <- err
+	}()
+	return answer
+}
+
+// awaitProbe waits up to half the timeout for the answer of a probe stream; answered is false
+// when none came, the stream then being served and still open.
+func (s *suite) awaitProbe(probe <-chan error) (err error, answered bool) {
+	wait := time.NewTimer(s.timeout / 2)
+	defer wait.Stop()
+	select {
+	case err = <-probe:
+		return err, true
+	case <-wait.C:
+		return nil, false
 	}
 }
 

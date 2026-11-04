@@ -287,6 +287,12 @@ func TestEachDefectFailsItsCheck(t *testing.T) {
 			failing: "processor.signals", detail: "ALREADY_EXISTS",
 		},
 		{
+			// A newest-wins processor serves the second stream and ends the first one with OK: the
+			// first stream ended because of the second, so the rule was broken, not left unprobed.
+			name: "second Process stream replaces the first", env: "BROKEN_NEWEST_WINS=1", failing: "processor.signals",
+			detail: "ALREADY_EXISTS",
+		},
+		{
 			// The processor ends its stream on its own once it has the records, before the suite
 			// closes its side: the second stream it then serves is not a second concurrent stream.
 			name: "Process stream ended by the processor before the suite closed its side", env: "BROKEN_ENDS_EARLY=1",

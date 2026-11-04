@@ -37,7 +37,8 @@
 //	                     sample, and only of the devices and signals the fixture declares;
 //	                     while that stream is open a second Process stream of the instance is
 //	                     refused with ALREADY_EXISTS (not probed when the processor ended the
-//	                     stream on its own before the suite closed its side)
+//	                     stream on its own before the suite closed its side; a processor that
+//	                     ends the first stream to serve the second one fails)
 //	output.configure     as input.configure, for output fixtures
 //	output.send          a valid batch is answered with one of the six outcomes; REJECT_INVALID
 //	                     carries a reason (RETRY_AFTER may come without retry_after)
