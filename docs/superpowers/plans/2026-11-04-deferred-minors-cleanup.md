@@ -263,12 +263,13 @@ git commit -m "docs: README, CONTRIBUTING and handshake.md minors"
   divergences, the stricter conformance checks (S8, S10) named, the items outside this plan, and `**Documented in:**`;
   mark the INDEX row closed. Commit.
 
-- [ ] **Step 4: Release.** After the user merges the pull request: tag `v0.1.2` on the merge commit with release notes
+- [x] **Step 4: Release.** After the user merges the pull request: tag `v0.1.2` on the merge commit with release notes
   listing S1, S3, the stricter conformance checks and the fixes, the way `v0.1.1` was tagged. The tag is pushed only
-  with the user's go-ahead. (Waits for the user's merge and go-ahead; the tag message is drafted.)
+  with the user's go-ahead. (Done: annotated tag `v0.1.2` on merge commit `4e9e10e`, pushed on 2026-11-05.)
 
-- [ ] **Step 5: Follow-up in `laraedge`**: a branch that bumps `github.com/getlaraplate/laraedge-sdk` to `v0.1.2`,
-  runs the agent's suite and e2e, and opens a pull request. (Waits for the `v0.1.2` tag.)
+- [x] **Step 5: Follow-up in `laraedge`**: a branch that bumps `github.com/getlaraplate/laraedge-sdk` to `v0.1.2`,
+  runs the agent's suite and e2e, and opens a pull request. (Done: getlaraplate/laraedge#11, merged into `develop` as `b781e61`; suite
+  2964 passed with `-race`, e2e 8 passed.)
 
 ## Delivery status (2026-11-04)
 
@@ -353,10 +354,10 @@ examples as CI runs it (simulated-counter 12 checks, line-state 11, jsonl 12).
 
 - `Release` of removed instances: a protocol addition, so a new RPC and a minor version. It gets its own plan across
   `laraedge-sdk` and `laraedge` (laraedge plan 3, Q7; ruling R18 of `2026-10-23-sdk.md`).
-- Bumping `laraedge` to `v0.1.2`: Task 7 Step 5, after the tag.
+- Bumping `laraedge` to `v0.1.2`: done as Task 7 Step 5 (getlaraplate/laraedge#11).
 
-**Not done yet:** Task 7 Steps 4 and 5. Tagging `v0.1.2` on the merge commit, from the drafted message, waits for the
-user's merge and go-ahead, and the `laraedge` bump waits for the tag.
+**Release (2026-11-05):** `v0.1.2` tagged on merge commit `4e9e10e` (getlaraplate/laraedge-sdk#3); `laraedge` bumped
+to it in getlaraplate/laraedge#11.
 
 **Documented in:** `docs/handshake.md`, `examples/README.md`, `README.md`, `CONTRIBUTING.md`, and the package
 documentation of `sdk`, `handshake`, `manifest` and `conformance`.
